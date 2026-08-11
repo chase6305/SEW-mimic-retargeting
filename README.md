@@ -14,9 +14,6 @@ teleoperation and real-time motion-retargeting prototypes.
 
 [![Marvin M6 viser demo](docs/media/marvin_viser.gif)](docs/media/marvin_viser.mp4)
 
-Click the GIF preview to open the higher-quality
-[MP4 demo](docs/media/marvin_viser.mp4).
-
 ## Features
 
 - Rodrigues rotation formula.
