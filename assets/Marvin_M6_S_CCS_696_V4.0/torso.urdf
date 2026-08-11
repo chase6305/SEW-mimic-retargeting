@@ -1,0 +1,61 @@
+<?xml version='1.0' encoding='utf-8'?>
+<robot name="torso">
+  <!---->
+  <!---->
+  <!-- Start of (links for part: torso) -->
+  <link name="base_link">
+    <inertial>
+      <origin xyz="0 1.33E-06 0.1597" rpy="0 0 0" />
+      <mass value="74.515" />
+      <inertia ixx="8.67491803" ixy="0.07182226" ixz="0" iyy="8.67495749" iyz="0.00008096" izz="4.32871357" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="visual/base_link.glb" />
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="collision/base_link.stl" />
+      </geometry>
+    </collision>
+  </link>
+  <link name="torso_base">
+    <inertial>
+      <origin xyz="1.321E-05 -4.225E-05 0.06485" rpy="0 0 0" />
+      <mass value="3.52" />
+      <inertia ixx="0.01763033" ixy="-0.00000075" ixz="0.00000045" iyy="0.02001856" iyz="7.41E-06" izz="0.01060882" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="visual/torso_base.glb" />
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="collision/torso_base.stl" />
+      </geometry>
+    </collision>
+  </link>
+  <link name="upper_body_base" />
+  <!-- End of (links for part: torso) -->
+  <!---->
+  <!---->
+  <!-- Start of (joints for part: torso) -->
+  <joint name="BASE_LINK_TO_TORSO_CONNECTOR" type="fixed">
+    <origin xyz="0 0 0.981" rpy="0 0 0" />
+    <parent link="base_link" />
+    <child link="torso_base" />
+    <axis xyz="0 0 0" />
+  </joint>
+  <joint name="UPPER_BODY_BASE" type="fixed">
+    <origin xyz="0 0 0.140" rpy="0 0 0" />
+    <parent link="torso_base" />
+    <child link="upper_body_base" />
+  </joint>
+  <!-- End of (joints for part: torso) -->
+</robot>

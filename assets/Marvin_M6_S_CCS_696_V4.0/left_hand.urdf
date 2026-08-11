@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="utf-8"?>
+
+<robot name="left_hand"> 
+  <!-- Hand module transplanted from the supplied Marvin Pro model. -->  
+  <link name="left_ee"/>  
+  <link name="left_hand_mount_link"/>  
+  <link name="left_hand_base_link"> 
+    <visual> 
+      <origin xyz="0 0 0" rpy="0 0 0"/>  
+      <geometry> 
+        <mesh filename="visual/glb/left_hand_base_link.glb"/> 
+      </geometry> 
+    </visual>  
+    <collision> 
+      <origin xyz="0 0 0" rpy="0 0 0"/>  
+      <geometry> 
+        <mesh filename="collision/left_hand_base_link.obj"/> 
+      </geometry> 
+    </collision>  
+    <inertial> 
+      <origin xyz="-0.000142 0.005641 0.0488811" rpy="0 0 0"/>  
+      <mass value="0.4064271"/>  
+      <inertia ixx="0.0002976" ixy="-0.0000024" ixz="0.0000011" iyy="0.0004831" iyz="-0.0000721" izz="0.0004721"/> 
+    </inertial> 
+  </link>  
+  <link name="left_hand_finger_1_link"> 
+    <visual> 
+      <origin xyz="0 0 0" rpy="0 0 0"/>  
+      <geometry> 
+        <mesh filename="visual/glb/left_hand_finger_1_link.glb"/> 
+      </geometry> 
+    </visual>  
+    <collision> 
+      <origin xyz="0 0 0" rpy="0 0 0"/>  
+      <geometry> 
+        <mesh filename="collision/left_hand_finger_1_link.obj"/> 
+      </geometry> 
+    </collision>  
+    <inertial> 
+      <origin xyz="-0.0166753 -0.0028108 0.0127051" rpy="0 0 0"/>  
+      <mass value="0.031395"/>  
+      <inertia ixx="0.0000116" ixy="-0.0000013" ixz="0" iyy="0.0000048" iyz="0" izz="0.0000102"/> 
+    </inertial> 
+  </link>  
+  <link name="left_hand_finger_2_link"> 
+    <visual> 
+      <origin xyz="0 0 0" rpy="0 0 0"/>  
+      <geometry> 
+        <mesh filename="visual/glb/left_hand_finger_2_link.glb"/> 
+      </geometry> 
+    </visual>  
+    <collision> 
+      <origin xyz="0 0 0" rpy="0 0 0"/>  
+      <geometry> 
+        <mesh filename="collision/left_hand_finger_2_link.obj"/> 
+      </geometry> 
+    </collision>  
+    <inertial> 
+      <origin xyz="0.0089293 -0.0028108 0.0127051" rpy="0 0 0"/>  
+      <mass value="0.031395"/>  
+      <inertia ixx="0.0000116" ixy="-0.0000013" ixz="0" iyy="0.0000048" iyz="0" izz="0.0000102"/> 
+    </inertial> 
+  </link>  
+  <link name="left_hand_tool_link"/>  
+  <joint name="LEFT_EE_TO_HAND_MOUNT" type="fixed"> 
+    <parent link="left_ee"/>  
+    <child link="left_hand_mount_link"/>  
+    <origin xyz="0 0 0" rpy="0 0 -1.5707963"/> 
+  </joint>  
+  <joint name="LEFT_HAND_MOUNT_TO_BASE" type="fixed"> 
+    <parent link="left_hand_mount_link"/>  
+    <child link="left_hand_base_link"/>  
+    <origin xyz="0 0 0" rpy="0 0 0"/> 
+  </joint>  
+  <joint name="LEFT_HAND_FINGER_1" type="prismatic"> 
+    <parent link="left_hand_base_link"/>  
+    <child link="left_hand_finger_1_link"/>  
+    <origin xyz="0.105 -0.01 0.0916374" rpy="1.5777046 -0.0094492 -3.1190022"/>  
+    <axis xyz="1 0 0"/>  
+    <limit lower="0" upper="0.05" effort="30" velocity="0"/>  
+    <dynamics damping="8" friction="0.2"/> 
+  </joint>  
+  <joint name="LEFT_HAND_FINGER_2" type="prismatic"> 
+    <parent link="left_hand_base_link"/>  
+    <child link="left_hand_finger_2_link"/>  
+    <origin xyz="-0.05 -0.002 0.1105" rpy="1.5372318 0.0098779 0.0227581"/>  
+    <axis xyz="1 0 0"/>  
+    <limit lower="0" upper="0.05" effort="0" velocity="0"/>  
+    <dynamics damping="8" friction="0.2"/>  
+    <mimic joint="LEFT_HAND_FINGER_1" multiplier="1" offset="0"/> 
+  </joint>  
+  <joint name="LEFT_HAND_TOOL" type="fixed"> 
+    <parent link="left_hand_base_link"/>  
+    <child link="left_hand_tool_link"/>  
+    <origin xyz="0 0 0" rpy="0 -1.5707963 -1.5707963"/> 
+  </joint> 
+</robot>
