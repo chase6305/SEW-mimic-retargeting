@@ -22,10 +22,12 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
       - name: Install package and development dependencies
-        run: python -m pip install -e '.[dev,visualization]'
+        run: python -m pip install -e '.[dev,visualization,safety]'
       - name: Check formatting
         run: ruff format --check src examples tests
       - name: Lint
         run: ruff check src examples tests
       - name: Test
         run: pytest
+      - name: Build wheel with bundled Marvin assets
+        run: python -m build --wheel

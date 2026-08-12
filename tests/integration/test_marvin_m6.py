@@ -3,6 +3,10 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from examples.demo_marvin_collision_avoidance import (
+    collision_test_trajectory,
+    plan_filtered_trajectory,
+)
 from examples.demo_marvin_viser import (
     humanlike_reference_trajectory,
     minimum_jerk_trajectory,
@@ -10,7 +14,14 @@ from examples.demo_marvin_viser import (
     retarget_reference_trajectory,
 )
 from sew_mimic import alignment_diagnostics, sew_mimic
-from sew_mimic.robots import DEFAULT_MARVIN_URDF, load_marvin_arm
+from sew_mimic.robots import (
+    DEFAULT_MARVIN_URDF,
+    MarvinSafetyFilter,
+    URDFKinematics,
+    estimate_marvin_capsule_config,
+    load_marvin_arm,
+    marvin_bimanual_pose,
+)
 
 
 def test_minimum_jerk_trajectory_endpoints():
@@ -82,3 +93,49 @@ def test_humanlike_trajectory_retargets_both_arms(side):
     assert max_error < 1e-8
     assert np.all(solved >= robot.q_min - 1e-10)
     assert np.all(solved <= robot.q_max + 1e-10)
+
+
+@pytest.mark.skipif(not Path(DEFAULT_MARVIN_URDF).is_file(), reason="Marvin asset is not installed")
+def test_marvin_position_fk_and_oobb_capsules():
+    left = load_marvin_arm(side="left")
+    right = load_marvin_arm(side="right")
+    kinematics = URDFKinematics(DEFAULT_MARVIN_URDF)
+    pose = marvin_bimanual_pose(kinematics, left, right, np.zeros(7), np.zeros(7))
+    points = pose.points()
+    assert points.shape == (8, 3)
+    assert np.all(np.isfinite(points))
+    assert np.all(
+        np.linalg.norm(points[[1, 2, 3, 5, 6, 7]] - points[[0, 1, 2, 4, 5, 6]], axis=1) > 0.05
+    )
+
+    config = estimate_marvin_capsule_config()
+    assert 0.04 < config.radii.upper_arm < 0.12
+    assert 0.04 < config.radii.lower_arm < 0.12
+    assert 0.04 < config.radii.hand < 0.12
+    assert 0.05 < config.radii.torso < 0.20
+
+
+@pytest.mark.skipif(not Path(DEFAULT_MARVIN_URDF).is_file(), reason="Marvin asset is not installed")
+def test_collision_demo_blocks_unsafe_trajectory():
+    safety_filter = MarvinSafetyFilter()
+    _, desired_left, desired_right = collision_test_trajectory(duration=2.0, fps=10.0)
+    solve_timings = []
+    safe_left, safe_right, target_distances, command_distances, accepted = plan_filtered_trajectory(
+        safety_filter, desired_left, desired_right, solve_timings
+    )
+    assert len(solve_timings) == len(desired_left)
+    assert np.all(np.asarray(solve_timings) > 0.0)
+    assert np.all(np.linalg.norm(np.diff(desired_left, axis=0), axis=1) > 0.0)
+    assert np.min(target_distances) < 0.0
+    assert np.min(command_distances) >= safety_filter.config.minimum_distance
+    assert np.any(~accepted)
+    assert accepted[-1]
+    assert np.allclose(safe_left[-1], desired_left[-1])
+    assert np.allclose(safe_right[-1], desired_right[-1])
+
+    middle_pose = safety_filter.forward_kinematics(
+        desired_left[len(desired_left) // 2], desired_right[len(desired_right) // 2]
+    )
+    moving_heights = middle_pose.points()[[1, 2, 3, 5, 6, 7], 2]
+    assert np.min(moving_heights) > 0.85
+    assert np.max(moving_heights) < 1.20

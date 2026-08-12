@@ -3,81 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import time
-import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import numpy as np
 
-from sew_mimic import Serial7DoF, alignment_diagnostics, rot, sew_mimic
-from sew_mimic.robots import DEFAULT_MARVIN_URDF, load_marvin_arm, rpy_rotation
-
-
-class UrdfForwardKinematics:
-    """Small URDF FK helper used to place viser coordinate-frame overlays."""
-
-    def __init__(self, urdf_path: Path) -> None:
-        root = ET.parse(urdf_path).getroot()
-        child_links = set()
-        self.joints = []
-        self.joint_child_links: dict[str, str] = {}
-        for joint in root.findall("joint"):
-            parent_element = joint.find("parent")
-            child_element = joint.find("child")
-            if parent_element is None or child_element is None:
-                continue
-            origin = joint.find("origin")
-            axis = joint.find("axis")
-            xyz = np.fromstring("0 0 0" if origin is None else origin.get("xyz", "0 0 0"), sep=" ")
-            rpy = np.fromstring("0 0 0" if origin is None else origin.get("rpy", "0 0 0"), sep=" ")
-            axis_xyz = np.fromstring("1 0 0" if axis is None else axis.get("xyz", "1 0 0"), sep=" ")
-            parent = str(parent_element.get("link"))
-            child = str(child_element.get("link"))
-            child_links.add(child)
-            self.joint_child_links[str(joint.get("name"))] = child
-            self.joints.append(
-                (
-                    str(joint.get("name")),
-                    str(joint.get("type")),
-                    parent,
-                    child,
-                    xyz,
-                    rpy_rotation(rpy),
-                    axis_xyz,
-                )
-            )
-        all_links = {link.get("name") for link in root.findall("link")}
-        roots = all_links - child_links
-        if len(roots) != 1:
-            raise ValueError(f"Expected one URDF root link, found {sorted(roots)}")
-        self.root_link = str(roots.pop())
-
-    def link_transforms(self, joint_positions: dict[str, float]) -> dict[str, np.ndarray]:
-        transforms = {self.root_link: np.eye(4)}
-        pending = list(self.joints)
-        while pending:
-            progressed = False
-            for joint in pending[:]:
-                name, joint_type, parent, child, xyz, origin_R, axis = joint
-                if parent not in transforms:
-                    continue
-                T_parent_child = np.eye(4)
-                T_parent_child[:3, :3] = origin_R
-                T_parent_child[:3, 3] = xyz
-                value = float(joint_positions.get(name, 0.0))
-                if joint_type in ("revolute", "continuous"):
-                    T_motion = np.eye(4)
-                    T_motion[:3, :3] = rot(axis, value)
-                    T_parent_child = T_parent_child @ T_motion
-                elif joint_type == "prismatic":
-                    T_parent_child[:3, 3] += origin_R @ (axis * value)
-                transforms[child] = transforms[parent] @ T_parent_child
-                pending.remove(joint)
-                progressed = True
-            if not progressed:
-                missing = [joint[0] for joint in pending]
-                raise ValueError(f"Could not traverse URDF joint tree: {missing}")
-        return transforms
+from sew_mimic import Serial7DoF, alignment_diagnostics, configure_logging, sew_mimic
+from sew_mimic.robots import DEFAULT_MARVIN_URDF, URDFKinematics, load_marvin_arm
 
 
 def rotation_to_wxyz(R: np.ndarray) -> tuple[float, float, float, float]:
@@ -270,6 +203,12 @@ def reference_keypoint_trajectory(robot: Serial7DoF, reference: np.ndarray) -> n
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--log-level",
+        choices=("DEBUG", "INFO", "WARNING", "ERROR"),
+        default="INFO",
+        help="library and demo logging verbosity",
+    )
     parser.add_argument("--urdf", type=Path, default=DEFAULT_MARVIN_URDF)
     parser.add_argument("--side", choices=("left", "right", "both"), default="both")
     parser.add_argument("--port", type=int, default=8080)
@@ -287,6 +226,7 @@ def main() -> None:
         help="seconds per gesture cycle; independent of total duration",
     )
     args = parser.parse_args()
+    configure_logging(getattr(logging, args.log_level))
 
     try:
         import viser
@@ -302,7 +242,7 @@ def main() -> None:
     target_keypoints = {}
     solve_timings: list[float] = []
     max_errors = {}
-    urdf_fk = UrdfForwardKinematics(args.urdf)
+    urdf_fk = URDFKinematics(args.urdf)
     trajectory_times = None
     for side, arm in arms.items():
         times, reference = humanlike_reference_trajectory(

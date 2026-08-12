@@ -23,13 +23,28 @@ Repository = "https://github.com/chase6305/SEW-mimic-retargeting"
 [project.optional-dependencies]
 test = ["pytest>=7"]
 visualization = ["viser>=1.0,<2", "yourdfpy>=0.0.58"]
-dev = ["pytest>=7", "ruff>=0.6"]
+safety = ["trimesh>=4.0"]
+dev = ["build>=1", "pytest>=7", "ruff>=0.6"]
 
 [tool.setuptools]
 package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.data-files]
+"share/sew-mimic-retargeting/assets/Marvin_M6_S_CCS_696_V4.0" = [
+    "assets/Marvin_M6_S_CCS_696_V4.0/*.urdf",
+]
+"share/sew-mimic-retargeting/assets/Marvin_M6_S_CCS_696_V4.0/collision" = [
+    "assets/Marvin_M6_S_CCS_696_V4.0/collision/*.obj",
+]
+"share/sew-mimic-retargeting/assets/Marvin_M6_S_CCS_696_V4.0/visual/glb" = [
+    "assets/Marvin_M6_S_CCS_696_V4.0/visual/glb/*.glb",
+]
+"share/sew-mimic-retargeting/assets/Marvin_M6_S_CCS_696_V4.0/visual/stl" = [
+    "assets/Marvin_M6_S_CCS_696_V4.0/visual/stl/*.stl",
+]
 
 [tool.pytest.ini_options]
 pythonpath = ["src", "."]

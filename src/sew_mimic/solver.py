@@ -22,6 +22,7 @@ perpendicular in the sense required by the paper.
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
 from typing import List, Sequence, Tuple
@@ -38,6 +39,8 @@ from .utility import (
 )
 from .utility import as_vec3 as _as_vec3
 from .utility import is_rotation_matrix as _is_rotation_matrix
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -312,6 +315,7 @@ def align_axis(
     does not explicitly state this zeroing step, but it is needed to turn the
     printed local geometry into absolute joint-angle solutions.
     """
+    logger.debug("AlignAxis started: target_joint=%d", joint_number_i)
     if joint_number_i not in (3, 5, 7):
         raise ValueError("SEW-Mimic AlignAxis expects i in {3, 5, 7}")
 
@@ -365,6 +369,13 @@ def align_axis(
         )
 
     candidates.sort(key=lambda x: x[0])
+    logger.debug(
+        "AlignAxis completed: target_joint=%d candidates=%d q=(%.6f, %.6f)",
+        joint_number_i,
+        len(candidates),
+        candidates[0][1],
+        candidates[0][2],
+    )
     return candidates[0][1], candidates[0][2]
 
 
@@ -382,6 +393,7 @@ def align_wrist_parallel(
     coordinate-free equivalent R_des @ h7, which reduces to the first column
     when h7 is the local +X axis and also supports other local h7 conventions.
     """
+    logger.debug("Parallel wrist alignment started")
     q = np.asarray(q0, dtype=np.float64).reshape(-1).copy()
     H = np.asarray(H, dtype=np.float64)
     if q.shape != (7,):
@@ -407,7 +419,9 @@ def align_wrist_parallel(
     q7_raw, _ = sp1(h6_in_7_at_q7_zero, u6_in_7, -robot.axes_local[6])
     q7 = _bound_angle(q7_raw, robot, 6, q0[6])
 
-    return np.array([q5, q6, q7], dtype=np.float64)
+    result = np.array([q5, q6, q7], dtype=np.float64)
+    logger.debug("Parallel wrist alignment completed: q=%s", result)
+    return result
 
 
 def sew_mimic(
@@ -427,6 +441,7 @@ def sew_mimic(
 
     Returns a 7-element joint vector q.
     """
+    logger.debug("SEW-Mimic solve started")
     q = np.asarray(q0, dtype=np.float64).reshape(-1).copy()
     if q.shape != (7,):
         raise ValueError("q0 must have shape (7,)")
@@ -442,6 +457,7 @@ def sew_mimic(
     q[0:2] = align_axis(robot, 3, q, upper_direction)
     q[2:4] = align_axis(robot, 5, q, lower_direction)
     q[4:7] = align_wrist_parallel(robot, q, H)
+    logger.debug("SEW-Mimic solve completed: q=%s", q)
     return q
 
 

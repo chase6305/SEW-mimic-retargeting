@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from collections.abc import Sequence
 
@@ -9,6 +10,14 @@ import numpy as np
 
 EPS = 1e-10
 TWO_PI = 2.0 * math.pi
+
+
+def configure_logging(level: int | str = logging.INFO) -> None:
+    """Configure concise stage logging for command-line applications."""
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+    )
 
 
 class SEWMimicError(RuntimeError):

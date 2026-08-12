@@ -3,34 +3,29 @@
 [![CI](https://github.com/chase6305/SEW-mimic-retargeting/actions/workflows/ci.yml/badge.svg)](https://github.com/chase6305/SEW-mimic-retargeting/actions/workflows/ci.yml)
 
 A Python/NumPy implementation of the closed-form geometric retargeting method
-from **A Closed-Form Geometric Retargeting Solver for Upper Body Humanoid Robot
-Teleoperation**, with a repository-local Marvin M6 model, dual-arm trajectory
-demo, and interactive viser visualization.
-
-The solver retargets human upper-arm and forearm directions together with hand
-orientation to a seven-DoF robot arm. It uses closed-form geometric subproblems
-instead of iterative numerical optimization, making it suitable for low-latency
-teleoperation and real-time motion-retargeting prototypes.
-
-## Demo video
+from *A Closed-Form Geometric Retargeting Solver for Upper Body Humanoid Robot
+Teleoperation*. The repository includes the Marvin M6 robot assets, single- and
+dual-arm retargeting, interactive viser demos, and the paper's capsule/XPBD
+bimanual self-collision safety-filter pipeline.
 
 ![Marvin M6 viser demo](docs/media/marvin_viser.gif)
 
-## Features
+## Highlights
 
-- Rodrigues rotation formula.
-- IK-Geo geometric Subproblems 1, 2, and 4.
-- Closed-form two-joint `AlignAxis`.
-- Parallel-wrist `AlignWrist`.
-- Single-arm, seven-DoF SEW-Mimic solver.
-- Joint-limit filtering and closest analytical-solution selection.
-- Automatic Marvin M6 left/right arm adaptation from URDF.
-- Continuous dual-arm trajectory generation and frame-by-frame retargeting.
-- viser visualization of the URDF, human keypoints, bones, and coordinate frames.
-- Solver throughput and latency measurements.
+- Closed-form seven-DoF arm retargeting without iterative numerical IK.
+- IK-Geo Subproblems 1, 2, and 4.
+- Parallel-wrist `AlignWrist` and joint-limit-aware analytical solution selection.
+- Marvin M6 left/right arm extraction from the bundled URDF.
+- Continuous 60-second dual-arm human-like motion demo.
+- Viser visualization of robot meshes, keypoints, bones, and coordinate frames.
+- Capsule parameters estimated from collision-mesh oriented bounding boxes.
+- Continuous-path collision sampling and XPBD bimanual safety filtering.
+- Final FK validation before a corrected command is accepted.
+- Stage logging and clearly defined solve-rate/latency metrics.
+- Unit, integration, formatting, linting, wheel-build, and asset-packaging checks.
 
-The core solver matches directions and orientation rather than absolute human
-limb lengths:
+SEW-Mimic matches limb directions and hand orientation rather than absolute
+human limb lengths:
 
 ```text
 upper-arm direction = normalize(elbow - shoulder)
@@ -38,132 +33,41 @@ forearm direction   = normalize(wrist - elbow)
 end-effector target = hand_orientation
 ```
 
-## Repository layout
-
-```text
-SEW-mimic-retargeting/
-├── src/sew_mimic/
-│   ├── __init__.py                    Public Python API
-│   ├── solver.py                      Closed-form SEW-Mimic solver
-│   └── robots/
-│       ├── __init__.py
-│       └── marvin_m6.py               Marvin M6 URDF adapter
-├── examples/
-│   ├── demo_toy.py                    Synthetic FK-to-SEW example
-│   └── demo_marvin_viser.py           Dual-arm viser demo
-├── tests/
-│   ├── unit/test_solver.py            Geometric solver unit tests
-│   └── integration/test_marvin_m6.py  URDF and dual-arm integration tests
-├── assets/Marvin_M6_S_CCS_696_V4.0/
-│   ├── robot_with_ee.urdf             Default complete robot model
-│   ├── collision/                     Collision meshes
-│   └── visual/                        GLB and STL visual meshes
-├── docs/media/
-│   └── marvin_viser.gif               README demo preview
-├── .github/workflows/ci.yml            Lint and test automation
-├── pyproject.toml
-├── requirements.txt
-└── .gitignore
-```
-
 ## Installation
 
 Python 3.10 or newer is required.
 
-Install only the core package:
+Core solver only:
 
 ```bash
 pip install -e .
 ```
 
-Install test dependencies:
-
-```bash
-pip install -e '.[test]'
-```
-
-Install viser visualization dependencies:
+Viser demos:
 
 ```bash
 pip install -e '.[visualization]'
 ```
 
-Install everything needed for development:
+OOBB capsule fitting and safety-filter configuration:
 
 ```bash
-pip install -e '.[dev,visualization]'
+pip install -e '.[safety]'
 ```
 
-## Formatting and linting
-
-The repository uses [Ruff](https://docs.astral.sh/ruff/) for Python formatting,
-import sorting, and lightweight linting. The configuration is stored in
-`pyproject.toml`; general editor whitespace rules are stored in `.editorconfig`.
-
-Format all Python code:
+Complete development environment:
 
 ```bash
-ruff format src examples tests
+pip install -e '.[dev,visualization,safety]'
 ```
 
-Check formatting without changing files:
+The Marvin URDF, collision meshes, and visual meshes are included in built
+wheels as data files. An alternative URDF can be supplied to every Marvin API
+and demo with an explicit path.
 
-```bash
-ruff format --check src examples tests
-```
+## Quick start
 
-Run lint checks and apply safe automatic fixes:
-
-```bash
-ruff check --fix src examples tests
-```
-
-Run the same checks without modifying files:
-
-```bash
-ruff check src examples tests
-```
-
-## Testing
-
-Run the complete unit and Marvin M6 integration test suite:
-
-```bash
-pytest
-```
-
-The integration tests load the bundled `robot_with_ee.urdf`, exercise both
-arms, generate reference trajectories, and verify retargeting accuracy and
-joint-limit compliance. GitHub Actions runs formatting, linting, and tests on
-Python 3.10 and 3.12 for every push and pull request.
-
-## Core API
-
-### Load a Marvin arm
-
-```python
-from sew_mimic.robots import load_marvin_arm
-
-left_arm = load_marvin_arm(side="left")
-right_arm = load_marvin_arm(side="right")
-```
-
-The adapter reads the repository-local
-`assets/Marvin_M6_S_CCS_696_V4.0/robot_with_ee.urdf` and extracts:
-
-- the ordered seven-joint arm chain;
-- local joint axes and zero-configuration URDF RPY rotations;
-- lower and upper joint limits;
-- parent/child chain topology; and
-- the fixed `LEFT_EE` or `RIGHT_EE` transform.
-
-An alternative URDF can be supplied explicitly:
-
-```python
-arm = load_marvin_arm("/path/to/robot_with_ee.urdf", side="left")
-```
-
-### Solve one frame
+### Solve one arm frame
 
 ```python
 import numpy as np
@@ -173,15 +77,15 @@ from sew_mimic.robots import load_marvin_arm
 
 arm = load_marvin_arm(side="left")
 
-q0 = np.zeros(7)                       # Current joint angles [rad]
-shoulder = np.array([0.0, 0.0, 0.0])
+q_current = np.zeros(7)                 # radians
+shoulder = np.array([0.0, 0.0, 0.0])   # metres, left_arm_base frame
 elbow = np.array([0.20, 0.20, 0.05])
 wrist = np.array([0.45, 0.25, 0.10])
-hand_orientation = np.eye(3)           # Valid SO(3) rotation matrix
+hand_orientation = np.eye(3)            # valid SO(3) rotation matrix
 
-q = sew_mimic(
+q_command = sew_mimic(
     arm.robot,
-    q0,
+    q_current,
     shoulder,
     elbow,
     wrist,
@@ -189,7 +93,7 @@ q = sew_mimic(
 )
 ```
 
-The returned joint order is:
+The returned Marvin joint order is:
 
 ```text
 SHOULDER_PITCH
@@ -201,18 +105,57 @@ WRIST_YAW
 WRIST_ROLL
 ```
 
-### Input conventions
+### Filter one bimanual command
 
-- Left-arm inputs must be expressed in `left_arm_base`.
-- Right-arm inputs must be expressed in `right_arm_base`.
-- Shoulder, elbow, wrist, and hand orientation must share one coordinate frame.
-- Position inputs should normally use meters. Absolute human limb length does
-  not affect the direction-only arm objective.
-- `q0` and returned joint angles are in radians.
+```python
+import numpy as np
+
+from sew_mimic.robots import MarvinSafetyFilter
+
+safety_filter = MarvinSafetyFilter(padding=1.05)
+
+result = safety_filter.filter(
+    q_left_current=np.zeros(7),
+    q_right_current=np.zeros(7),
+    q_left_desired=q_left_target,
+    q_right_desired=q_right_target,
+)
+
+q_left_command = result.q_left
+q_right_command = result.q_right
+
+print(result.safe)
+print(result.status.value)
+print(result.minimum_distance)  # metres; negative means capsule penetration
+print(result.iterations)
+```
+
+`MarvinSafetyFilter(...)` is also callable directly and delegates to `filter()`.
+
+Safety-filter statuses:
+
+| Status | Meaning |
+|---|---|
+| `accepted` | The desired command was already collision-free. |
+| `corrected` | XPBD generated a corrected command that passed final FK validation. |
+| `xpbd_failed` | XPBD did not achieve the configured safety distance. |
+| `ik_failed` | Corrected keypoints had no valid joint-limit-aware SEW solution. |
+| `validation_failed` | The reconstructed joint pose remained unsafe. |
+
+For every failure status, the filter returns the current pose rather than the
+unsafe desired pose.
+
+## Input conventions
+
+- `q_current`, `q_command`, and joint limits use radians.
+- Left-arm inputs use `left_arm_base`; right-arm inputs use `right_arm_base`.
+- Shoulder, elbow, wrist, and hand orientation must share one frame.
+- Positions conventionally use metres, although limb length does not affect the
+  direction-only SEW objective.
 - Shoulder-to-elbow and elbow-to-wrist vectors must not be near zero.
-- `hand_orientation` must be a valid 3-by-3 SO(3) rotation matrix.
+- `hand_orientation` must be a finite 3-by-3 SO(3) matrix.
 
-For human inputs expressed in a world frame:
+To convert world-frame human inputs into an arm-base frame:
 
 ```python
 R_arm_world = R_world_arm.T
@@ -223,36 +166,36 @@ wrist_arm = R_arm_world @ (wrist_world - p_world_arm)
 hand_orientation_arm = R_arm_world @ hand_orientation_world
 ```
 
-## Examples
+## Demos
 
-### Synthetic consistency demo
+### Synthetic solver consistency
 
 ```bash
 python examples/demo_toy.py
 ```
 
-This demo performs FK from known joint angles, constructs corresponding SEW
-targets, and recovers the joint angles through the closed-form solver. Upper-arm,
-forearm, and tool-orientation errors should be near floating-point precision.
+This runs FK from known joint angles, reconstructs corresponding SEW targets,
+and solves them again. Direction and tool-orientation errors should be close to
+floating-point precision.
 
-### Marvin M6 dual-arm viser demo
+### Marvin M6 dual-arm motion
 
 ```bash
 python examples/demo_marvin_viser.py --side both
 ```
 
-Default settings:
+Default behavior:
 
 ```text
 Trajectory duration    60 s
 Trajectory rate        60 Hz
 Playback speed         1.75x
 Arms                   left + right
-viser port             8080
+Viser port             8080
 Loop playback          enabled
 ```
 
-All options can be overridden:
+Example with explicit settings:
 
 ```bash
 python examples/demo_marvin_viser.py \
@@ -261,55 +204,166 @@ python examples/demo_marvin_viser.py \
   --motion-cycle 60 \
   --fps 60 \
   --playback-speed 1.75 \
-  --port 8080
+  --port 8080 \
+  --log-level INFO
 ```
 
-The generated motion program contains two repetitions of each group:
+The motion program contains chest expansion/crossing, asymmetric arm swings,
+alternating punches, level-wrist push/pull motion, and running-style arm swings.
+The interface includes playback controls, fourteen arm joint sliders, human
+keypoints, bone segments, compact joint frames, enlarged end-effector frames,
+and closed-form solver performance metrics.
 
-1. Chest-front crossing and chest expansion.
-2. A large asymmetric swing with the left arm high and right arm low.
-3. Alternating punches while the opposite hand remains in guard.
-4. Synchronized zombie-style push/pull: wrists remain level and in fixed
-   lateral lanes while the elbows flex and extend.
-5. Alternating running-style arm swings.
-
-The viser interface provides:
-
-- the complete Marvin URDF model;
-- fourteen left/right arm joint sliders;
-- colored shoulder, elbow, and wrist target keypoints;
-- upper-arm and forearm bone segments;
-- arm-base, joint, and enlarged end-effector coordinate frames; and
-- play, pause, loop, restart, timeline, and playback-speed controls.
-
-The default URDF and meshes are resolved relative to this repository. To use a
-different model path:
+### Bimanual self-collision avoidance
 
 ```bash
-python examples/demo_marvin_viser.py --urdf /path/to/robot_with_ee.urdf
+python examples/demo_marvin_collision_avoidance.py \
+  --duration 12 \
+  --fps 30 \
+  --port 8081 \
+  --padding 1.05 \
+  --log-level INFO
 ```
+
+The red translucent robot follows a continuous chest-height target that passes
+through a colliding cross-arm pose. The solid robot displays the command allowed
+by the safety filter. The target never pauses: only the command temporarily
+holds its last safe pose while the target crosses the unsafe region, then
+resumes tracking after the target becomes safe.
+
+The GUI reports:
+
+- unsafe target signed capsule distance in metres;
+- filtered command signed capsule distance in metres;
+- `SAFE` or `BLOCKED / HOLDING LAST SAFE POSE`;
+- complete safety-filter solve rate in Hz;
+- mean and P95 safety latency in milliseconds per bimanual frame; and
+- the selected trajectory sample's solve time.
+
+## Self-collision safety filter
+
+The safety layer follows the structure of paper Algorithms 4 and 9-12:
+
+1. Compute desired bimanual shoulder/elbow/wrist/tool keypoints with FK.
+2. Approximate torso, upper arms, lower arms, and hands with capsules.
+3. Interpolate from the current pose to find the first activated collision.
+4. Apply XPBD collision constraints to the capsule keypoints.
+5. Project modified links back to their original lengths.
+6. Recover tool directions and solve corrected SEW targets.
+7. Recompute FK and reject any reconstructed pose that remains unsafe.
+
+For Marvin M6, OOBB fitting uses the longest oriented-box dimension as the
+capsule axis. Half of the larger transverse dimension becomes the radius, with
+configurable padding. Fitting is cached by `(URDF path, padding)` and is not part
+of the per-frame real-time path.
+
+Default parameters can be inspected or replaced:
+
+```python
+from sew_mimic import CapsuleIndex, SafetyFilterConfig
+from sew_mimic.robots import MarvinSafetyFilter, estimate_marvin_capsule_config
+
+default_config = estimate_marvin_capsule_config(padding=1.05)
+
+custom_config = SafetyFilterConfig(
+    radii=default_config.radii,
+    torso_start=default_config.torso_start,
+    torso_end=default_config.torso_end,
+    minimum_distance=0.01,
+    activation_distance=0.03,
+    release_distance=0.04,
+    compliance=1e-6,
+    iterations=20,
+    collision_pairs=(
+        (CapsuleIndex.LEFT_HAND, CapsuleIndex.RIGHT_HAND),
+        (CapsuleIndex.LEFT_LOWER_ARM, CapsuleIndex.RIGHT_LOWER_ARM),
+    ),
+)
+
+safety_filter = MarvinSafetyFilter(config=custom_config)
+```
+
+The distance thresholds must satisfy:
+
+```text
+minimum_distance <= activation_distance <= release_distance
+```
+
+Adjacent same-arm capsules and torso-to-upper-arm attachment pairs are excluded
+from the default collision-pair set.
 
 ## Performance metrics
 
-The viser panel reports:
+The regular Marvin demo measures only the closed-form solver:
 
-```text
-Single-arm solve rate [Hz]
-Dual-arm pose-pair rate [pairs/s]
-Mean solve latency [ms/arm]
+| Metric | Unit | Scope |
+|---|---|---|
+| Single-arm solve rate | Hz | Individual SEW arm solves per second. |
+| Dual-arm pose-pair rate | pairs/s | Sequential left+right solve pairs per second. |
+| Mean solve latency | ms/arm | Mean time for one arm solve. |
+
+The collision demo measures one complete bimanual safety-filter call, including
+FK, capsule checking, continuous sampling, XPBD, optional SEW reconstruction,
+and final validation. It excludes trajectory generation, logging, Viser scene
+updates, networking, and browser rendering.
+
+On the current development machine, the included collision trajectory reaches
+approximately 996 complete bimanual safety frames/s with about 1.00 ms mean and
+3.52 ms P95 latency. Treat these numbers as a local reference, not a platform
+guarantee. CPU architecture, NumPy build, logging level, safety parameters, and
+the number of active constraints all affect performance.
+
+## Logging
+
+The package uses standard-library `logging` and does not configure handlers on
+import.
+
+```python
+from sew_mimic import configure_logging
+
+configure_logging("INFO")   # model loading, OOBB initialization, summaries
+# configure_logging("DEBUG")  # per-frame FK, collision, XPBD, and SEW stages
 ```
 
-- `Hz` is the number of individual arm solves completed per second.
-- `pairs/s` is the number of complete dual-arm pose pairs per second when the
-  left and right arms are solved sequentially.
-- `ms/arm` is the mean latency of one single-arm solve.
+Use `INFO` or `WARNING` for runtime applications. `DEBUG` intentionally emits
+detailed per-stage/per-iteration messages and affects benchmark results.
 
-These metrics time only the closed-form SEW-Mimic call. They exclude URDF FK,
-viser scene updates, network communication, and browser rendering.
+## Repository layout
 
-## Tests
+```text
+SEW-mimic-retargeting/
+├── src/sew_mimic/
+│   ├── __init__.py                    Public API
+│   ├── solver.py                      Closed-form SEW solver and robot model
+│   ├── utility.py                     Rotation, validation, and angle utilities
+│   ├── collision.py                   Capsule geometry and OOBB fitting
+│   ├── safety.py                      Continuous collision and XPBD filter
+│   └── robots/
+│       ├── marvin_m6.py               Marvin adapter and high-level filter
+│       └── urdf.py                    Dependency-free general URDF FK
+├── examples/
+│   ├── demo_toy.py
+│   ├── demo_marvin_viser.py
+│   └── demo_marvin_collision_avoidance.py
+├── tests/
+│   ├── unit/
+│   │   ├── test_solver.py
+│   │   ├── test_utility.py
+│   │   ├── test_collision.py
+│   │   └── test_safety.py
+│   └── integration/test_marvin_m6.py
+├── assets/Marvin_M6_S_CCS_696_V4.0/
+│   ├── robot_with_ee.urdf
+│   ├── collision/
+│   └── visual/
+├── docs/media/marvin_viser.gif
+├── .github/workflows/ci.yml
+└── pyproject.toml
+```
 
-Run the complete suite:
+## Development
+
+Run all tests:
 
 ```bash
 pytest -q
@@ -322,43 +376,51 @@ pytest -q tests/unit
 pytest -q tests/integration
 ```
 
-The suite covers:
+Format and lint:
 
-- numerical correctness of SP1, SP2, and SP4;
-- randomized FK-to-SEW-to-solver consistency;
-- Marvin left/right URDF extraction and axis morphology;
-- joint-limit compliance;
-- dual-arm trajectory continuity and retargeting accuracy; and
-- human keypoint limb lengths.
+```bash
+ruff format src examples tests
+ruff check src examples tests
+```
+
+Build a wheel containing the Marvin assets:
+
+```bash
+python -m build --wheel
+```
+
+GitHub Actions runs Ruff, all tests, and wheel construction on Python 3.10 and
+3.12 for every push and pull request.
 
 ## Current limitations
 
-- The core implementation currently supports the paper's parallel-wrist path.
-- The perpendicular-wrist Euler-decomposition appendix path is not implemented.
-- The XPBD/capsule safety filter is not implemented.
-- The demo does not enforce robot self-collision or environment collision.
-- The core method retargets directions and orientation; it is not an absolute
-  end-effector position IK solver.
-- The included trajectory is procedurally generated and is not motion-capture data.
+- The core solver implements the paper's parallel-wrist path; the perpendicular-
+  wrist Euler-decomposition appendix path is not implemented.
+- The core objective matches directions and orientation, not absolute tool
+  position.
+- The safety filter handles configured robot self-collision capsules; it does
+  not model environment obstacles.
+- Capsule/OOBB geometry is an approximation of the original mesh geometry.
+- Like the paper's proposed filter, the XPBD safety layer is heuristic and does
+  not provide a formal collision-avoidance guarantee.
+- The included demo trajectories are procedural rather than motion-capture data.
 
-## Notes on the paper pseudocode
+## Paper reproduction notes
 
 The implementation resolves several notation and printing inconsistencies in
 the paper pseudocode:
 
 - SP4 follows the IK-Geo argument order `SP4(h, p, k, d)`.
 - `MakeFrame` returns `[ux, uy, uz]`, correcting the duplicated `uy` in print.
-- `AlignAxis` uses the frame-consistent expression
-  `R^(i-2,i-1) h_(i-1)`.
+- `AlignAxis` uses the frame-consistent expression `R^(i-2,i-1) h_(i-1)`.
 - Analytical angles are expanded by equivalent `2*pi` rotations, filtered by
-  limits, and selected by distance from `q0`.
-- Wrist alignment uses the coordinate-free expression `R07_des @ h7`, allowing
-  different local axis conventions.
+  joint limits, and selected by distance from `q_current`.
+- Wrist alignment uses `R07_des @ h7`, supporting different local-axis conventions.
 
 ## Citation
 
-If this repository or the underlying method is useful in your work, please cite
-the original paper:
+If this repository or the underlying method is useful in your work, cite the
+original paper:
 
 ```bibtex
 @article{kong2026closed_form_geometric_retargeting,

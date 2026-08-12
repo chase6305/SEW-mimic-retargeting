@@ -609,7 +609,7 @@
   <joint name="LEFT_EE_TO_HAND_MOUNT" type="fixed"> 
     <parent link="left_ee"/>  
     <child link="left_hand_mount_link"/>  
-    <origin xyz="0 0 0" rpy="0 0 -1.5707963"/> 
+    <origin xyz="0 0 0" rpy="0 0 3.141592653589793"/> 
   </joint>  
   <joint name="LEFT_HAND_MOUNT_TO_BASE" type="fixed"> 
     <parent link="left_hand_mount_link"/>  
@@ -643,7 +643,7 @@
   <joint name="RIGHT_EE_TO_HAND_MOUNT" type="fixed"> 
     <parent link="right_ee"/>  
     <child link="right_hand_mount_link"/>  
-    <origin xyz="0 0 0" rpy="0 0 -1.5707963"/> 
+    <origin xyz="0 0 0" rpy="0 0 0"/> 
   </joint>  
   <joint name="RIGHT_HAND_MOUNT_TO_BASE" type="fixed"> 
     <parent link="right_hand_mount_link"/>  
