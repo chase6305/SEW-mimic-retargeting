@@ -17,6 +17,7 @@ from typing import Literal
 
 import numpy as np
 
+from ..backends import solve
 from ..collision import capsule_from_oobb
 from ..safety import (
     ArmPose,
@@ -26,7 +27,7 @@ from ..safety import (
     SafetyFilterResult,
     sew_safety_filter,
 )
-from ..solver import Serial7DoF, sew_mimic
+from ..solver import Serial7DoF
 from .urdf import URDFKinematics, rpy_rotation
 
 logger = logging.getLogger(__name__)
@@ -186,17 +187,28 @@ def marvin_bimanual_pose(
 ) -> BimanualPose:
     """Return paper SEW/tool keypoints in the common Marvin URDF root frame."""
     logger.debug("Marvin bimanual position FK started")
+    links = kinematics.joint_child_links
+    required_links = (
+        links[left_arm.joint_names[0]],
+        links[left_arm.joint_names[3]],
+        links[left_arm.joint_names[5]],
+        left_arm.ee_link,
+        links[right_arm.joint_names[0]],
+        links[right_arm.joint_names[3]],
+        links[right_arm.joint_names[5]],
+        right_arm.ee_link,
+    )
     positions = {
         **dict(zip(left_arm.joint_names, np.asarray(q_left, dtype=np.float64))),
         **dict(zip(right_arm.joint_names, np.asarray(q_right, dtype=np.float64))),
     }
-    transforms = kinematics.link_transforms(positions)
+    transforms = kinematics.link_transforms(positions, required_links)
 
     def arm_pose(arm: MarvinArm) -> ArmPose:
         # Joint actuator locations are the origins of child-link frames.
-        shoulder_link = _joint_child(kinematics, arm.joint_names[0])
-        elbow_link = _joint_child(kinematics, arm.joint_names[3])
-        wrist_link = _joint_child(kinematics, arm.joint_names[5])
+        shoulder_link = links[arm.joint_names[0]]
+        elbow_link = links[arm.joint_names[3]]
+        wrist_link = links[arm.joint_names[5]]
         shoulder = transforms[shoulder_link][:3, 3]
         elbow = transforms[elbow_link][:3, 3]
         wrist = transforms[wrist_link][:3, 3]
@@ -212,13 +224,6 @@ def marvin_bimanual_pose(
     pose = BimanualPose(arm_pose(left_arm), arm_pose(right_arm))
     logger.debug("Marvin bimanual position FK completed")
     return pose
-
-
-def _joint_child(kinematics: URDFKinematics, joint_name: str) -> str:
-    for name, _, _, child, _, _ in kinematics.joints:
-        if name == joint_name:
-            return child
-    raise KeyError(joint_name)
 
 
 @lru_cache(maxsize=8)
@@ -273,7 +278,12 @@ def estimate_marvin_capsule_config(
 
 
 class MarvinSafetyFilter:
-    """Ready-to-use bimanual Marvin safety filter with OOBB capsule parameters."""
+    """Ready-to-use bimanual Marvin safety filter with OOBB capsule parameters.
+
+    ``backend`` explicitly selects both SEW recovery and collision/XPBD
+    implementation. Use ``"python"`` for the reference path or ``"cpp"`` for
+    the installed native extension; no automatic fallback is performed.
+    """
 
     def __init__(
         self,
@@ -281,9 +291,11 @@ class MarvinSafetyFilter:
         *,
         padding: float = 1.05,
         config: SafetyFilterConfig | None = None,
+        backend: str = "python",
     ) -> None:
         logger.info("Marvin safety-filter initialization started")
         self.urdf_path = Path(urdf_path).expanduser().resolve()
+        self.backend = backend
         self.left = load_marvin_arm(self.urdf_path, "left")
         self.right = load_marvin_arm(self.urdf_path, "right")
         self.kinematics = URDFKinematics(self.urdf_path)
@@ -310,13 +322,14 @@ class MarvinSafetyFilter:
         def point_in_base(point: np.ndarray) -> np.ndarray:
             return rotation_base_world @ (point - position_world_base)
 
-        return sew_mimic(
+        return solve(
             arm.robot,
             q_current,
             point_in_base(pose.shoulder),
             point_in_base(pose.elbow),
             point_in_base(pose.wrist),
             rotation_base_world @ pose.tool_orientation,
+            backend=self.backend,
         )
 
     def filter(
@@ -337,6 +350,7 @@ class MarvinSafetyFilter:
             solve_left=lambda q, pose: self._solve(self.left, q, pose),
             solve_right=lambda q, pose: self._solve(self.right, q, pose),
             config=self.config,
+            backend=self.backend,
         )
         logger.debug(
             "Marvin safety-filter frame completed: safe=%s iterations=%d distance=%.6f m",

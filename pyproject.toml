@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=61", "pybind11>=2.11"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -24,7 +24,15 @@ Repository = "https://github.com/chase6305/SEW-mimic-retargeting"
 test = ["pytest>=7"]
 visualization = ["viser>=1.0,<2", "yourdfpy>=0.0.58"]
 safety = ["trimesh>=4.0"]
-dev = ["build>=1", "pytest>=7", "ruff>=0.6"]
+dev = [
+    "build>=1",
+    "mdformat>=0.7,<1",
+    "mdformat-gfm>=0.3,<1",
+    "pytest>=7",
+    "ruff>=0.6",
+]
+cpp = ["pybind11>=2.11"]
+cpp-dev = ["clang-format==18.1.8", "pybind11>=2.11"]
 
 [tool.setuptools]
 package-dir = {"" = "src"}
@@ -71,3 +79,6 @@ quote-style = "double"
 indent-style = "space"
 line-ending = "lf"
 docstring-code-format = true
+
+[tool.mdformat]
+wrap = 100

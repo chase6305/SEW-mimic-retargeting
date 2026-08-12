@@ -61,6 +61,108 @@ Complete development environment:
 pip install -e '.[dev,visualization,safety]'
 ```
 
+C++ development, including the pinned formatter:
+
+```bash
+pip install -e '.[dev,cpp,cpp-dev]'
+clang-format -i src/cpp/sew_mimic_cpp.cpp
+```
+
+### Python/C++ backend selection
+
+The public `solve()` API requires the application layer to choose `python` or
+`cpp`. The default is `python`; there is no implicit fallback between implementations:
+
+```python
+from sew_mimic import get_backend, solve
+
+q = solve(robot, q0, shoulder, elbow, wrist, hand_orientation, backend="cpp")
+print(get_backend("cpp").name)
+```
+
+Deployment diagnostics are available without initializing a native robot model:
+
+```python
+from sew_mimic import backend_status
+
+print(backend_status())
+# {'default': 'python', 'cpp_available': True, 'cpp_implementation': 'native'}
+```
+
+A process-wide default can be selected with `SEW_MIMIC_BACKEND`. Build the
+optional extension with:
+
+```bash
+SEW_MIMIC_BUILD_CPP=1 pip install -e '.[cpp]'
+export SEW_MIMIC_BACKEND=cpp  # python | cpp
+```
+
+For CMake-based Jetson or system integration builds:
+
+```bash
+cmake -S src/cpp -B build/cpp \
+  -DCMAKE_BUILD_TYPE=Release \
+  -Dpybind11_DIR="$(python -m pybind11 --cmakedir)"
+cmake --build build/cpp --parallel
+```
+
+Selecting `cpp` fails immediately if the extension is unavailable. Existing
+`sew_mimic()` calls remain the direct Python API.
+The native C++17 backend implements SP1/SP2/SP4, axis and wrist alignment,
+joint-limit handling, rotation/FK operations, and the complete single-arm
+SEW-Mimic solve. It uses the same calibrated NumPy-array model data, so robot
+adapters and application code are shared by both implementations.
+
+The native code is organized around focused classes:
+
+- `RobotModel` owns calibrated axes, fixed rotations, limits, and rotational FK;
+- `SewMimicSolver` owns axis alignment, wrist recovery, and the complete solve;
+- `CapsuleCollisionDetector` owns segment closest-point and signed-distance queries.
+- `XpbdCollisionProjector` owns native constraint multipliers and point projection.
+
+The Python boundary mirrors those responsibilities with `CppBackend` for arm
+solving and `CppCollisionBackend` for collision/XPBD. Safety code does not import
+the private pybind module directly, which keeps native binding details isolated.
+
+`CppBackend` caches one persistent native `SewMimicSolver` for each calibrated
+`Serial7DoF` object, so axes, limits, and fixed rotations are parsed once rather
+than once per frame. The cache is LRU-bounded to 16 robot objects and can be
+released explicitly with `get_backend("cpp").clear_cache()`. Ordered trajectories
+can cross the binding once:
+
+```python
+from sew_mimic import solve_batch
+
+q_trajectory = solve_batch(
+    robot,
+    q_initial,
+    shoulders,          # (N, 3)
+    elbows,             # (N, 3)
+    wrists,             # (N, 3)
+    hand_orientations,  # (N, 3, 3)
+    backend="cpp",
+)
+```
+
+Batch solving is stateful within the call: each frame starts from the previous
+frame's solution, matching the real-time single-frame API and branch-selection
+behavior. The Python backend implements the same contract.
+
+Native computation releases the Python GIL after array validation. Independent
+left/right arm batches, capsule queries, and XPBD projections can therefore run
+concurrently in application-managed worker threads. On the current two-worker
+test, two 100,000-frame batches improved from `0.617 s` sequential to `0.308 s`
+parallel (approximately `2.0x`). The backend itself does not create threads, so
+thread ownership and real-time scheduling remain explicit at the application layer.
+
+Selecting `backend="cpp"` on a robot safety filter applies to SEW solving,
+capsule contacts/minimum-distance checks, XPBD multiplier updates, collision
+gradient projection, link-length projection, and convergence testing. Python
+retains an independent implementation of the complete path as the reference.
+
+See [Performance metrics](#performance-metrics) for the reference hardware,
+measurement scope, Python/C++ results, and the exact reproduction command.
+
 The Marvin URDF, collision meshes, and visual meshes are included in built
 wheels as data files. An alternative URDF can be supplied to every Marvin API
 and demo with an explicit path.
@@ -112,7 +214,185 @@ arm = load_robot_arm("openarm", side="left")
 ```
 
 Aliases such as `m6`, `marvin-m6`, and `open-arm` are accepted by the Python
-registry. A custom URDF path can be passed as the third argument.
+registry. Applications can register additional adapters and aliases at runtime;
+a custom URDF path can be passed as the third argument.
+
+## Integrating a new robot
+
+Integration is deliberately split into three levels. Complete level 1 before
+adding visualization, and validate visualization before enabling collision
+correction. This keeps kinematic convention errors separate from safety-model
+errors.
+
+### 1. Check the kinematic contract
+
+Each arm exposed to SEW-Mimic must be a serial seven-DoF revolute chain ordered
+from shoulder to wrist. The adapter must provide:
+
+| Field                  | Meaning                                                                     |
+| ---------------------- | --------------------------------------------------------------------------- |
+| `axes_local`           | Seven joint axes expressed in their URDF joint frames.                      |
+| `R_local`              | Seven fixed parent-to-joint origin rotations, in chain order.               |
+| `q_min`, `q_max`       | Finite lower/upper joint limits in radians.                                 |
+| `R_7T_local`           | Fixed rotation from joint-seven child frame to the tracked hand/tool frame. |
+| `R_align`              | Rotation aligning the human hand convention with the robot tool convention. |
+| `joint_names`          | Seven URDF actuated-joint names in the exact solver order.                  |
+| `base_link`, `ee_link` | Arm reference link and tracked hand/tool link used by FK and Viser.         |
+
+Do not infer the hand frame from its visual mesh. Follow the fixed-joint chain
+from joint seven to the intended control landmark. A hand-base link is often a
+better retargeting landmark than a fingertip TCP. All shoulder, elbow, wrist,
+and hand-orientation inputs passed to one solve must use the same arm-base
+coordinate frame and SI units.
+
+The returned arm object is structural: it may be any dataclass that satisfies
+the `RobotArm` protocol. `MarvinArm` and `OpenArmArm` are working examples.
+
+### 2. Implement and register the arm adapter
+
+Create a robot module outside the core package first. Its loader should parse
+the URDF, verify that the seven named joints form one continuous chain, extract
+axes/origin rotations/limits, accumulate the fixed tool rotation, and construct
+`Serial7DoF`. Avoid embedding calibrated matrices without documenting their
+URDF source.
+
+```python
+from dataclasses import dataclass
+from pathlib import Path
+
+import numpy as np
+
+from sew_mimic import Serial7DoF
+from sew_mimic.robots import RobotAdapter, register_robot_adapter
+
+
+@dataclass(frozen=True)
+class MyRobotArm:
+    side: str
+    robot: Serial7DoF
+    joint_names: tuple[str, ...]
+    base_link: str
+    ee_link: str
+
+
+def load_my_robot_arm(urdf_path: str | Path, side: str) -> MyRobotArm:
+    # Parse and validate the URDF here. See load_openarm_arm() for a complete
+    # implementation including topology and fixed-tool-chain checks.
+    axes_local = np.asarray(...)       # (7, 3)
+    origin_rotations = np.asarray(...) # (7, 3, 3)
+    q_min, q_max = np.asarray(...), np.asarray(...)
+    tool_rotation = np.asarray(...)    # (3, 3)
+    model = Serial7DoF(
+        axes_local=axes_local,
+        R_local=origin_rotations,
+        q_min=q_min,
+        q_max=q_max,
+        R_7T_local=tool_rotation,
+        R_align=np.eye(3),
+    )
+    return MyRobotArm(side, model, tuple(...), "arm_base", "hand_base")
+
+
+def my_reference_trajectory(side, duration, fps, cycle_duration=None):
+    """Return times and a smooth, joint-limit-valid (N, 7) reference path."""
+    times = np.linspace(0.0, duration, int(np.ceil(duration * fps)) + 1)
+    reference = np.zeros((len(times), 7))
+    return times, reference
+
+
+register_robot_adapter(
+    RobotAdapter(
+        name="my-robot",
+        display_name="My Robot",
+        default_urdf=Path("assets/MyRobot/robot.urdf"),
+        load_arm=load_my_robot_arm,
+        trajectory_profile=my_reference_trajectory,
+        keypoint_profile="urdf",
+    ),
+    aliases=("myrobot",),
+)
+```
+
+Registration is process-local and thread-safe. Names use lowercase hyphenated
+form; duplicate names and aliases are rejected unless an application explicitly
+uses `replace=True`. A callable `trajectory_profile` lets the generic Viser demo
+support a new robot without adding robot-specific branches to the demo.
+`keypoint_profile="urdf"` draws physical URDF landmarks; use `"solver"` when
+the visualization should show the abstract SEW direction targets instead.
+
+Because registration must happen before CLI argument parsing, use a small
+launcher when the adapter lives outside this repository:
+
+```python
+import my_robot_adapter  # performs register_robot_adapter(...)
+
+from examples.demo_robot_viser import main
+
+main()
+```
+
+Then run the launcher with the normal arguments:
+
+```bash
+python my_robot_viser.py --robot my-robot --backend cpp --side both
+```
+
+### 3. Validate retargeting before safety
+
+Use known robot configurations as ground truth. For each test pose, obtain the
+shoulder/elbow/wrist directions and tool orientation from FK, solve from a
+nearby `q0`, and check `alignment_diagnostics()`. Include neutral, bent-elbow,
+near-extension, asymmetric, joint-limit, and left/right mirrored poses. A useful
+adapter test suite should verify:
+
+- the seven-joint topology and exact joint order;
+- FK at zero and at one non-zero configuration against a trusted URDF library;
+- `R_7T_local` and `R_align` tool-orientation agreement;
+- Python/C++ solutions within numerical tolerance;
+- batch and single-frame solutions produce the same stateful trajectory;
+- every generated demo reference remains inside joint limits.
+
+If shoulder and elbow positions look correct but the hand twists, fix the tool
+frame or `R_align`; do not compensate by altering the human trajectory. If the
+elbow bends on the wrong branch, check joint ordering, axis signs, limits, and
+the initial `q0`.
+
+### 4. Add collision geometry and a safety wrapper
+
+Safety integration is robot-specific because mesh names, torso placement, and
+valid collision pairs differ. Fit conservative capsules from collision-mesh
+OOBBs with `capsule_from_oobb()`, then create one cached `SafetyFilterConfig`.
+Use the longest OOBB axis for each capsule segment and the larger fitted radius
+across corresponding left/right links. Keep adjacent-link and physical
+attachment pairs excluded.
+
+The high-level wrapper must provide three callbacks to `sew_safety_filter()`:
+
+1. bimanual URDF FK returning `BimanualPose` in one root frame;
+1. a left-arm SEW solve that transforms projected points into the left base;
+1. a right-arm SEW solve that transforms projected points into the right base.
+
+Cache URDF parsing, zero-pose base transforms, OOBB results, collision-pair
+indices, and capsule radii during initialization. In the per-frame path, request
+only shoulder, elbow, wrist, and tool links from
+`URDFKinematics.link_transforms(..., required_links=...)`.
+
+Validate the safety layer with a continuous safe-to-colliding-to-safe motion,
+not only isolated poses. Record target and filtered minimum distance, result
+status, XPBD iterations, mean/P95 latency, and verify that failure returns the
+current command. Only after these tests should the robot be added to the generic
+collision demo.
+
+### Integration acceptance checklist
+
+- Solver inputs and FK outputs use metres, radians, and documented frames.
+- Both arms pass topology, FK, orientation, joint-limit, and mirror tests.
+- Python and C++ backends agree on representative poses and trajectories.
+- Viser frames clearly show base, shoulder, elbow, wrist, and tool conventions.
+- Capsule padding and every enabled/excluded collision pair are reviewed.
+- A continuous collision trajectory demonstrates correction and recovery.
+- Benchmarks are recorded on the deployment hardware with logging disabled.
+- Asset paths work both from a source checkout and an installed wheel.
 
 The returned Marvin joint order is:
 
@@ -155,13 +435,13 @@ print(result.iterations)
 
 Safety-filter statuses:
 
-| Status | Meaning |
-|---|---|
-| `accepted` | The desired command was already collision-free. |
-| `corrected` | XPBD generated a corrected command that passed final FK validation. |
-| `xpbd_failed` | XPBD did not achieve the configured safety distance. |
-| `ik_failed` | Corrected keypoints had no valid joint-limit-aware SEW solution. |
-| `validation_failed` | The reconstructed joint pose remained unsafe. |
+| Status              | Meaning                                                             |
+| ------------------- | ------------------------------------------------------------------- |
+| `accepted`          | The desired command was already collision-free.                     |
+| `corrected`         | XPBD generated a corrected command that passed final FK validation. |
+| `xpbd_failed`       | XPBD did not achieve the configured safety distance.                |
+| `ik_failed`         | Corrected keypoints had no valid joint-limit-aware SEW solution.    |
+| `validation_failed` | The reconstructed joint pose remained unsafe.                       |
 
 For every failure status, the filter returns the current pose rather than the
 unsafe desired pose.
@@ -241,6 +521,7 @@ Run the same visualization with the bundled OpenArm model:
 ```bash
 python examples/demo_robot_viser.py \
   --robot openarm \
+  --backend cpp \
   --side both \
   --duration 60 \
   --fps 60 \
@@ -259,6 +540,7 @@ backward-compatible Marvin entry point; new integrations should use
 ```bash
 python examples/demo_robot_collision_avoidance.py \
   --robot marvin \
+  --backend cpp \
   --duration 12 \
   --fps 30 \
   --port 8081 \
@@ -278,6 +560,7 @@ capsule model:
 ```bash
 python examples/demo_robot_collision_avoidance.py \
   --robot openarm \
+  --backend cpp \
   --duration 12 \
   --fps 30 \
   --port 8081
@@ -300,12 +583,12 @@ The GUI reports:
 The safety layer follows the structure of paper Algorithms 4 and 9-12:
 
 1. Compute desired bimanual shoulder/elbow/wrist/tool keypoints with FK.
-2. Approximate torso, upper arms, lower arms, and hands with capsules.
-3. Interpolate from the current pose to find the first activated collision.
-4. Apply XPBD collision constraints to the capsule keypoints.
-5. Project modified links back to their original lengths.
-6. Recover tool directions and solve corrected SEW targets.
-7. Recompute FK and reject any reconstructed pose that remains unsafe.
+1. Approximate torso, upper arms, lower arms, and hands with capsules.
+1. Interpolate from the current pose to find the first activated collision.
+1. Apply XPBD collision constraints to the capsule keypoints.
+1. Project modified links back to their original lengths.
+1. Recover tool directions and solve corrected SEW targets.
+1. Recompute FK and reject any reconstructed pose that remains unsafe.
 
 For Marvin M6, OOBB fitting uses the longest oriented-box dimension as the
 capsule axis. Half of the larger transverse dimension becomes the radius, with
@@ -349,24 +632,118 @@ from the default collision-pair set.
 
 ## Performance metrics
 
+### Metric definitions
+
 The regular Marvin demo measures only the closed-form solver:
 
-| Metric | Unit | Scope |
-|---|---|---|
-| Single-arm solve rate | Hz | Individual SEW arm solves per second. |
+| Metric                  | Unit    | Scope                                         |
+| ----------------------- | ------- | --------------------------------------------- |
+| Single-arm solve rate   | Hz      | Individual SEW arm solves per second.         |
 | Dual-arm pose-pair rate | pairs/s | Sequential left+right solve pairs per second. |
-| Mean solve latency | ms/arm | Mean time for one arm solve. |
+| Mean solve latency      | ms/arm  | Mean time for one arm solve.                  |
 
 The collision demo measures one complete bimanual safety-filter call, including
 FK, capsule checking, continuous sampling, XPBD, optional SEW reconstruction,
 and final validation. It excludes trajectory generation, logging, Viser scene
 updates, networking, and browser rendering.
 
-On the current development machine, the included collision trajectory reaches
-approximately 996 complete bimanual safety frames/s with about 1.00 ms mean and
-3.52 ms P95 latency. Treat these numbers as a local reference, not a platform
-guarantee. CPU architecture, NumPy build, logging level, safety parameters, and
-the number of active constraints all affect performance.
+`Hz`, `solves/s`, and `frames/s` all mean completed operations per second.
+Latency is reported in milliseconds per operation; lower latency and higher
+throughput are better. A dual-arm frame is one left-arm plus right-arm update,
+not two independently counted arm solves.
+
+### Reference hardware
+
+The following results were measured on 2026-08-12. They are reference values,
+not guaranteed real-time deadlines.
+
+| Component        | Reference system                                |
+| ---------------- | ----------------------------------------------- |
+| CPU              | AMD Ryzen 9 9950X, 16 cores / 32 threads        |
+| Memory           | 60 GiB available system RAM                     |
+| Operating system | Ubuntu Linux, kernel 6.8.0-106-generic, x86-64  |
+| Compiler         | GCC/G++ 11.4.0, C++17 release extension (`-O3`) |
+| Python stack     | Python 3.10.0, NumPy 2.2.6, pybind11 3.1.0      |
+
+The benchmark runs in one Python process with logging disabled. It uses 20,000
+timed calls for each microbenchmark and one pass over the included 12-second,
+30 Hz collision trajectory for the full safety test. CPU frequency scaling and
+other system load were not pinned, so small run-to-run variation is expected.
+
+### Reference results
+
+| Workload                                |  Python throughput |  Python latency |     C++ throughput |     C++ latency | C++ speedup |
+| --------------------------------------- | -----------------: | --------------: | -----------------: | --------------: | ----------: |
+| Single-arm SEW solve                    |   1,080.7 solves/s | 0.9253 ms/solve | 227,170.2 solves/s | 0.0044 ms/solve |      210.2x |
+| Seven-capsule bimanual minimum distance | 20,358.0 queries/s | 0.0491 ms/query | 53,828.8 queries/s | 0.0186 ms/query |        2.6x |
+| Complete bimanual safety frame          |     524.7 frames/s | 1.9060 ms/frame |   3,498.7 frames/s | 0.2858 ms/frame |        6.7x |
+
+At a 60 Hz control target, the complete safety pipeline provides approximately
+`8.7x` real-time throughput with the Python backend and `58.3x` with the C++
+backend on this reference system. These figures exclude visualization, robot
+communication, and sensor preprocessing. The full safety result also includes
+Python-side URDF FK and orchestration, so it does not represent only native C++
+execution time.
+
+Reproduce the table after installing the project with its native extension:
+
+```bash
+python -m benchmarks.benchmark_backends --iterations 20000 --trajectory-fps 30
+```
+
+### Jetson Orin NX status
+
+Jetson Orin NX performance has not yet been measured in this repository. The
+desktop results above must not be used as an Orin NX latency estimate: CPU
+architecture, power mode, clock policy, memory bandwidth, compiler, and thermal
+state differ substantially. Run the same command on the target and record the
+JetPack version, Orin NX memory variant, `nvpmodel` mode, clock policy, and
+cooling state alongside the output. A future measured row should use this form:
+
+| Platform       | Power/clock mode | Backend      | SEW solve | Safety frame | Status       |
+| -------------- | ---------------- | ------------ | --------: | -----------: | ------------ |
+| Jetson Orin NX | To be recorded   | Python / C++ |         — |            — | Not measured |
+
+Rendering performance is intentionally separate from solver performance because
+Viser update rate depends on browser, network, mesh complexity, and scene size.
+
+### Performance optimization methodology
+
+Optimize against the deployment pipeline, not only the closed-form kernel. Use
+the following loop for every performance change:
+
+1. Select a control target such as 60, 100, or 200 Hz and define what one frame
+   includes: input conversion, FK, collision sampling, XPBD, SEW recovery, final
+   validation, and command serialization.
+1. Profile a representative continuous trajectory with logging disabled. Keep
+   initialization/OOBB fitting outside the timed region and report mean, P95,
+   worst-case latency, active-constraint count, and failure status.
+1. Remove repeated parsing, topology traversal, immutable geometry construction,
+   and temporary arrays before moving more code to C++.
+1. Compare Python and C++ results after every native optimization. Numerical
+   agreement and safety status are release requirements, not optional checks.
+1. Repeat measurements across several processes/runs and record compiler flags,
+   CPU governor, power mode, clocks, temperature, and background load.
+
+The next high-value native optimization is a robot-specific or generic C++ FK
+plan that consumes the 14 bimanual joint values and emits only the eight safety
+keypoints and two tool rotations. This would remove most remaining Python matrix
+and dictionary work from the C++ safety path. After that, consider one native
+`filter_frame()` boundary that performs FK, capsule queries, XPBD, reconstruction,
+and validation without round trips through Python. Preserve the current Python
+implementation as the readable reference and parity oracle.
+
+For batch/offline retargeting, prefer `solve_batch()` and preallocated contiguous
+`float64` arrays. For online control, reuse robot models, safety configurations,
+FK plans, collision pairs, and output buffers. Do not share mutable scratch
+buffers across control threads unless ownership is explicit; allocation removal
+must not introduce data races.
+
+On Jetson Orin NX, benchmark native AArch64 builds in each intended `nvpmodel`
+mode with the production cooling setup. Optimize worst-case full safety-frame
+latency before solver throughput. GPU offload is unlikely to help individual
+seven-DoF closed-form solves; it becomes relevant only when upstream perception
+or large batched workloads already reside on the GPU.
 
 ## Logging
 
@@ -440,6 +817,7 @@ Format and lint:
 
 ```bash
 ruff format src examples tests
+mdformat README.md
 ruff check src examples tests
 ```
 
@@ -449,8 +827,8 @@ Build a wheel containing the Marvin assets:
 python -m build --wheel
 ```
 
-GitHub Actions runs Ruff, all tests, and wheel construction on Python 3.10 and
-3.12 for every push and pull request.
+GitHub Actions checks Python and Markdown formatting, runs all tests, and builds
+wheels on Python 3.10 and 3.12 for every push and pull request.
 
 ## Current limitations
 

@@ -89,7 +89,7 @@ def plan_filtered_trajectory(
     for index, (target_left, target_right) in enumerate(zip(desired_left, desired_right)):
         target_pose = safety_filter.forward_kinematics(target_left, target_right)
         target_distances[index] = minimum_capsule_distance(
-            target_pose.points(), safety_filter.config
+            target_pose.points(), safety_filter.config, backend=safety_filter.backend
         )
         solve_start = time.perf_counter()
         result = safety_filter(current_left, current_right, target_left, target_right)
@@ -101,7 +101,7 @@ def plan_filtered_trajectory(
         accepted[index] = result.safe
         command_pose = safety_filter.forward_kinematics(current_left, current_right)
         command_distances[index] = minimum_capsule_distance(
-            command_pose.points(), safety_filter.config
+            command_pose.points(), safety_filter.config, backend=safety_filter.backend
         )
     return safe_left, safe_right, target_distances, command_distances, accepted
 
@@ -109,6 +109,7 @@ def plan_filtered_trajectory(
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--robot", choices=available_robots(), default="marvin")
+    parser.add_argument("--backend", choices=("python", "cpp"), default="python")
     parser.add_argument("--urdf", type=Path, default=None, help="override the selected robot URDF")
     parser.add_argument("--duration", type=float, default=12.0)
     parser.add_argument("--fps", type=float, default=30.0)
@@ -134,7 +135,9 @@ def main() -> None:
     logger = logging.getLogger(__name__)
     logger.info("Collision-avoidance demo planning started")
     filter_classes = {"marvin": MarvinSafetyFilter, "openarm": OpenArmSafetyFilter}
-    safety_filter = filter_classes[args.robot](args.urdf, padding=args.padding)
+    safety_filter = filter_classes[args.robot](
+        args.urdf, padding=args.padding, backend=args.backend
+    )
     times, desired_left, desired_right = collision_test_trajectory(
         args.duration, args.fps, args.robot
     )

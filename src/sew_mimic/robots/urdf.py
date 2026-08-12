@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import logging
+import math
 import xml.etree.ElementTree as ET
+from collections.abc import Collection
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
@@ -11,6 +14,8 @@ import numpy as np
 from ..utility import skew, unit
 
 logger = logging.getLogger(__name__)
+_IDENTITY_3 = np.eye(3)
+_IDENTITY_3.flags.writeable = False
 
 
 def rpy_rotation(rpy: np.ndarray) -> np.ndarray:
@@ -92,11 +97,17 @@ class URDFKinematics:
             pending = remaining
         self.joints = ordered
         self.joint_child_links = {name: child for name, _, _, child, _, _ in self.joints}
+        self._joint_by_child = {child: joint for joint in self.joints for child in (joint[3],)}
         self._rotation_terms: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+        self._prismatic_axes: dict[str, np.ndarray] = {}
         for name, joint_type, _, _, _, axis in self.joints:
             if joint_type in ("revolute", "continuous"):
                 axis_skew = skew(unit(axis))
                 self._rotation_terms[name] = (axis_skew, axis_skew @ axis_skew)
+            elif joint_type == "prismatic":
+                normalized_axis = unit(axis)
+                normalized_axis.flags.writeable = False
+                self._prismatic_axes[name] = normalized_axis
         logger.info(
             "URDF kinematics loaded: path=%s root=%s joints=%d",
             self.path,
@@ -104,17 +115,49 @@ class URDFKinematics:
             len(self.joints),
         )
 
-    def link_transforms(self, joint_positions: dict[str, float]) -> dict[str, np.ndarray]:
+    @lru_cache(maxsize=32)
+    def _required_joint_names(self, required_links: frozenset[str]) -> frozenset[str]:
+        """Return the ancestor-joint closure needed to resolve target links."""
+        unknown = required_links - {self.root_link} - set(self._joint_by_child)
+        if unknown:
+            raise KeyError(f"Unknown URDF links: {sorted(unknown)}")
+        names: set[str] = set()
+        for target in required_links:
+            link = target
+            while link != self.root_link:
+                joint = self._joint_by_child[link]
+                names.add(joint[0])
+                link = joint[2]
+        return frozenset(names)
+
+    def link_transforms(
+        self,
+        joint_positions: dict[str, float],
+        required_links: Collection[str] | None = None,
+    ) -> dict[str, np.ndarray]:
+        """Compute FK, optionally pruning branches unrelated to target links.
+
+        When ``required_links`` is provided, the result contains the URDF root
+        and links on the targets' ancestor chains. This avoids evaluating hand,
+        sensor, and other fixed branches in high-rate control loops.
+        """
         logger.debug("URDF FK started: commanded_joints=%d", len(joint_positions))
+        required_joints = (
+            None
+            if required_links is None
+            else self._required_joint_names(frozenset(required_links))
+        )
         transforms = {self.root_link: np.eye(4)}
         for name, joint_type, parent, child, origin, axis in self.joints:
+            if required_joints is not None and name not in required_joints:
+                continue
             if joint_type in ("revolute", "continuous"):
                 theta = float(joint_positions.get(name, 0.0))
                 axis_skew, axis_skew_squared = self._rotation_terms[name]
                 rotation = (
-                    np.eye(3)
-                    + np.sin(theta) * axis_skew
-                    + (1.0 - np.cos(theta)) * axis_skew_squared
+                    _IDENTITY_3
+                    + math.sin(theta) * axis_skew
+                    + (1.0 - math.cos(theta)) * axis_skew_squared
                 )
                 transform = origin.copy()
                 transform[:3, :3] = origin[:3, :3] @ rotation
@@ -122,7 +165,7 @@ class URDFKinematics:
             elif joint_type == "prismatic":
                 transform = origin.copy()
                 transform[:3, 3] += origin[:3, :3] @ (
-                    float(joint_positions.get(name, 0.0)) * unit(axis)
+                    float(joint_positions.get(name, 0.0)) * self._prismatic_axes[name]
                 )
                 transforms[child] = transforms[parent] @ transform
             else:

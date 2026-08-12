@@ -12,6 +12,7 @@ from typing import Literal
 
 import numpy as np
 
+from ..backends import solve
 from ..collision import capsule_from_oobb
 from ..safety import (
     ArmPose,
@@ -21,7 +22,7 @@ from ..safety import (
     SafetyFilterResult,
     sew_safety_filter,
 )
-from ..solver import Serial7DoF, sew_mimic
+from ..solver import Serial7DoF
 from .urdf import URDFKinematics, rpy_rotation
 
 logger = logging.getLogger(__name__)
@@ -162,14 +163,24 @@ def openarm_bimanual_pose(
     q_right: np.ndarray,
 ) -> BimanualPose:
     """Return OpenArm SEW/tool keypoints in the common URDF root frame."""
+    links = kinematics.joint_child_links
+    required_links = (
+        links[left_arm.joint_names[0]],
+        links[left_arm.joint_names[3]],
+        links[left_arm.joint_names[5]],
+        left_arm.ee_link,
+        links[right_arm.joint_names[0]],
+        links[right_arm.joint_names[3]],
+        links[right_arm.joint_names[5]],
+        right_arm.ee_link,
+    )
     positions = {
         **dict(zip(left_arm.joint_names, np.asarray(q_left, dtype=np.float64))),
         **dict(zip(right_arm.joint_names, np.asarray(q_right, dtype=np.float64))),
     }
-    transforms = kinematics.link_transforms(positions)
+    transforms = kinematics.link_transforms(positions, required_links)
 
     def arm_pose(arm: OpenArmArm) -> ArmPose:
-        links = kinematics.joint_child_links
         tool = transforms[arm.ee_link]
         return ArmPose(
             transforms[links[arm.joint_names[0]]][:3, 3],
@@ -228,7 +239,12 @@ def estimate_openarm_capsule_config(
 
 
 class OpenArmSafetyFilter:
-    """Ready-to-use OpenArm bimanual capsule/XPBD safety filter."""
+    """Ready-to-use OpenArm bimanual capsule/XPBD safety filter.
+
+    ``backend`` explicitly selects both SEW recovery and collision/XPBD
+    implementation. The tracked tool link is each arm's ``*_hand_base``;
+    ``*_hand_tcp`` is intentionally excluded from the safety keypoint chain.
+    """
 
     def __init__(
         self,
@@ -236,8 +252,10 @@ class OpenArmSafetyFilter:
         *,
         padding: float = 1.05,
         config: SafetyFilterConfig | None = None,
+        backend: str = "python",
     ) -> None:
         self.urdf_path = Path(urdf_path).expanduser().resolve()
+        self.backend = backend
         self.left = load_openarm_arm(self.urdf_path, "left")
         self.right = load_openarm_arm(self.urdf_path, "right")
         self.kinematics = URDFKinematics(self.urdf_path)
@@ -259,13 +277,14 @@ class OpenArmSafetyFilter:
         def local(point: np.ndarray) -> np.ndarray:
             return rotation @ (point - origin)
 
-        return sew_mimic(
+        return solve(
             arm.robot,
             current,
             local(pose.shoulder),
             local(pose.elbow),
             local(pose.wrist),
             rotation @ pose.tool_orientation,
+            backend=self.backend,
         )
 
     def filter(
@@ -284,6 +303,7 @@ class OpenArmSafetyFilter:
             solve_left=lambda q, pose: self._solve(self.left, q, pose),
             solve_right=lambda q, pose: self._solve(self.right, q, pose),
             config=self.config,
+            backend=self.backend,
         )
 
     __call__ = filter

@@ -24,10 +24,41 @@ jobs:
       - name: Install package and development dependencies
         run: python -m pip install -e '.[dev,visualization,safety]'
       - name: Check formatting
-        run: ruff format --check src examples tests
+        run: |
+          ruff format --check src examples tests
+          mdformat --check README.md
       - name: Lint
         run: ruff check src examples tests
       - name: Test
         run: pytest
       - name: Build wheel with bundled Marvin assets
         run: python -m build --wheel
+
+  native:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+      - name: Install native development environment
+        run: python -m pip install -e '.[dev,cpp,visualization,safety]'
+        env:
+          SEW_MIMIC_BUILD_CPP: "1"
+      - name: Verify native extension identity
+        run: python -c "from sew_mimic import backend_status; assert backend_status()['cpp_implementation'] == 'native'"
+      - name: Check C++ formatting
+        run: clang-format --dry-run --Werror src/cpp/sew_mimic_cpp.cpp
+      - name: Run Python/C++ parity and integration tests
+        run: pytest
+      - name: Build native wheel
+        run: python -m build --wheel
+        env:
+          SEW_MIMIC_BUILD_CPP: "1"
+      - name: Verify native wheel in isolation
+        run: |
+          python -m venv /tmp/sew-native-wheel
+          /tmp/sew-native-wheel/bin/python -m pip install dist/*.whl
+          cd /tmp
+          /tmp/sew-native-wheel/bin/python -c "from sew_mimic import backend_status; from sew_mimic.robots import DEFAULT_MARVIN_URDF, DEFAULT_OPENARM_URDF; assert backend_status()['cpp_implementation'] == 'native'; assert DEFAULT_MARVIN_URDF.is_file() and DEFAULT_OPENARM_URDF.is_file()"

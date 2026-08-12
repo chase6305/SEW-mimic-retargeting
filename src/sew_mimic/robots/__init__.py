@@ -20,9 +20,11 @@ from .openarm import (
 from .registry import (
     RobotAdapter,
     RobotArm,
+    TrajectoryGenerator,
     available_robots,
     get_robot_adapter,
     load_robot_arm,
+    register_robot_adapter,
     resolve_robot_urdf,
 )
 from .urdf import URDFKinematics
@@ -36,6 +38,7 @@ __all__ = [
     "OpenArmSafetyFilter",
     "RobotAdapter",
     "RobotArm",
+    "TrajectoryGenerator",
     "URDFKinematics",
     "estimate_marvin_capsule_config",
     "estimate_openarm_capsule_config",
@@ -44,6 +47,7 @@ __all__ = [
     "load_marvin_arm",
     "load_openarm_arm",
     "load_robot_arm",
+    "register_robot_adapter",
     "marvin_bimanual_pose",
     "openarm_bimanual_pose",
     "rpy_rotation",

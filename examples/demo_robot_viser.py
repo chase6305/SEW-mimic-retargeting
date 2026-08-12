@@ -9,7 +9,13 @@ from pathlib import Path
 
 import numpy as np
 
-from sew_mimic import Serial7DoF, alignment_diagnostics, configure_logging, sew_mimic
+from sew_mimic import (
+    Serial7DoF,
+    alignment_diagnostics,
+    configure_logging,
+    solve,
+    solve_batch,
+)
 from sew_mimic.robots import (
     RobotArm,
     URDFKinematics,
@@ -308,23 +314,56 @@ def retarget_reference_trajectory(
     robot: Serial7DoF,
     reference: np.ndarray,
     solve_timings: list[float] | None = None,
+    backend: str = "python",
 ) -> tuple[np.ndarray, float]:
     """Convert a reachable reference motion to SEW inputs and solve each frame."""
-    solved = []
-    q_previous = np.zeros(7)
-    max_error = 0.0
-    for q_reference in reference:
-        upper = robot.axis_world(q_reference, 3)
-        lower = robot.axis_world(q_reference, 5)
-        hand = robot.tool_orientation(q_reference)
-        shoulder = np.zeros(3)
-        elbow = shoulder + 0.287 * upper
-        wrist = elbow + 0.314 * lower
+    shoulders = np.zeros((len(reference), 3), dtype=np.float64)
+    elbows = np.empty_like(shoulders)
+    wrists = np.empty_like(shoulders)
+    hands = np.empty((len(reference), 3, 3), dtype=np.float64)
+    for index, q_reference in enumerate(reference):
+        elbows[index] = 0.287 * robot.axis_world(q_reference, 3)
+        wrists[index] = elbows[index] + 0.314 * robot.axis_world(q_reference, 5)
+        hands[index] = robot.tool_orientation(q_reference)
+
+    if backend == "cpp":
         solve_start = time.perf_counter()
-        q_previous = sew_mimic(robot, q_previous, shoulder, elbow, wrist, hand)
+        solved_array = solve_batch(
+            robot,
+            np.zeros(7),
+            shoulders,
+            elbows,
+            wrists,
+            hands,
+            backend="cpp",
+        )
+        elapsed_per_frame = (time.perf_counter() - solve_start) / len(reference)
         if solve_timings is not None:
-            solve_timings.append(time.perf_counter() - solve_start)
-        errors = alignment_diagnostics(robot, q_previous, shoulder, elbow, wrist, hand)
+            solve_timings.extend([elapsed_per_frame] * len(reference))
+    else:
+        solved = []
+        q_previous = np.zeros(7)
+        for shoulder, elbow, wrist, hand in zip(shoulders, elbows, wrists, hands):
+            solve_start = time.perf_counter()
+            q_previous = solve(
+                robot,
+                q_previous,
+                shoulder,
+                elbow,
+                wrist,
+                hand,
+                backend=backend,
+            )
+            if solve_timings is not None:
+                solve_timings.append(time.perf_counter() - solve_start)
+            solved.append(q_previous.copy())
+        solved_array = np.asarray(solved)
+
+    max_error = 0.0
+    for q_solution, shoulder, elbow, wrist, hand in zip(
+        solved_array, shoulders, elbows, wrists, hands
+    ):
+        errors = alignment_diagnostics(robot, q_solution, shoulder, elbow, wrist, hand)
         max_error = max(
             max_error,
             *(
@@ -333,8 +372,7 @@ def retarget_reference_trajectory(
                 errors["tool_rotation_fro"],
             ),
         )
-        solved.append(q_previous.copy())
-    return np.asarray(solved), max_error
+    return solved_array, max_error
 
 
 def reference_keypoint_trajectory(robot: Serial7DoF, reference: np.ndarray) -> np.ndarray:
@@ -362,7 +400,10 @@ def urdf_reference_keypoint_trajectory(
     T_arm_world = np.linalg.inv(zero_transforms[arm.base_link])
     keypoints = np.empty((len(reference), 3, 3), dtype=np.float64)
     for index, q_reference in enumerate(reference):
-        transforms = kinematics.link_transforms(dict(zip(arm.joint_names, q_reference)))
+        transforms = kinematics.link_transforms(
+            dict(zip(arm.joint_names, q_reference)),
+            (shoulder_link, elbow_link, wrist_link),
+        )
         points_world = np.stack(
             [
                 transforms[shoulder_link][:3, 3],
@@ -377,6 +418,7 @@ def urdf_reference_keypoint_trajectory(
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--robot", choices=available_robots(), default="marvin")
+    parser.add_argument("--backend", choices=("python", "cpp"), default="python")
     parser.add_argument(
         "--log-level",
         choices=("DEBUG", "INFO", "WARNING", "ERROR"),
@@ -401,6 +443,15 @@ def main() -> None:
     )
     args = parser.parse_args()
     configure_logging(getattr(logging, args.log_level))
+    logger = logging.getLogger(__name__)
+    logger.info(
+        "Viser demo initialization: robot=%s backend=%s sides=%s duration=%.1f s fps=%.1f",
+        args.robot,
+        args.backend,
+        args.side,
+        args.duration,
+        args.fps,
+    )
     adapter = get_robot_adapter(args.robot)
     args.urdf = resolve_robot_urdf(args.robot, args.urdf)
 
@@ -421,26 +472,51 @@ def main() -> None:
     urdf_fk = URDFKinematics(args.urdf)
     trajectory_times = None
     for side, arm in arms.items():
+        logger.info("Trajectory planning started: side=%s backend=%s", side, args.backend)
         trajectory_generators = {
             "marvin_humanlike": humanlike_reference_trajectory,
             "openarm_safe": openarm_reference_trajectory,
         }
-        trajectory_generator = trajectory_generators[adapter.trajectory_profile]
+        if callable(adapter.trajectory_profile):
+            trajectory_generator = adapter.trajectory_profile
+        else:
+            try:
+                trajectory_generator = trajectory_generators[adapter.trajectory_profile]
+            except KeyError as exc:
+                raise ValueError(
+                    f"Robot {adapter.name!r} uses unknown trajectory profile "
+                    f"{adapter.trajectory_profile!r}; register a callable trajectory_profile"
+                ) from exc
         times, reference = trajectory_generator(side, args.duration, args.fps, args.motion_cycle)
-        trajectory, max_error = retarget_reference_trajectory(arm.robot, reference, solve_timings)
+        trajectory, max_error = retarget_reference_trajectory(
+            arm.robot, reference, solve_timings, args.backend
+        )
         trajectory_times = times
         trajectories[side] = trajectory
         target_keypoints[side] = (
             urdf_reference_keypoint_trajectory(urdf_fk, arm, reference)
-            if args.robot == "openarm"
+            if adapter.keypoint_profile == "urdf"
             else reference_keypoint_trajectory(arm.robot, reference)
         )
         max_errors[side] = max_error
+        logger.info(
+            "Trajectory planning completed: side=%s frames=%d max_error=%.3g",
+            side,
+            len(trajectory),
+            max_error,
+        )
     assert trajectory_times is not None
     total_solve_seconds = float(np.sum(solve_timings))
     arm_solve_fps = len(solve_timings) / total_solve_seconds
     pose_pair_fps = len(trajectory_times) / total_solve_seconds
     mean_solve_ms = total_solve_seconds / len(solve_timings) * 1e3
+    logger.info(
+        "SEW planning performance: backend=%s arm_rate=%.1f Hz pair_rate=%.1f Hz mean=%.4f ms/arm",
+        args.backend,
+        arm_solve_fps,
+        pose_pair_fps,
+        mean_solve_ms,
+    )
 
     server = viser.ViserServer(port=args.port)
     server.scene.set_up_direction("+z")

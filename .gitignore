@@ -2,11 +2,13 @@
 __pycache__/
 *.py[cod]
 *$py.class
+.cache/
 
 # Test, type-checker, and lint caches
 .pytest_cache/
 .coverage
 .coverage.*
+coverage.xml
 htmlcov/
 .mypy_cache/
 .ruff_cache/
@@ -15,11 +17,21 @@ htmlcov/
 
 # Packaging and editable-install artifacts
 build/
+*.build/
 dist/
+*.dist/
 *.egg-info/
 *.egg
+*.so
+*.dylib
+*.dll
+*.pyd
 .eggs/
 pip-wheel-metadata/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
 
 # Virtual environments
 .venv/
@@ -29,7 +41,9 @@ ENV/
 
 # IDE and editor state
 .idea/
-.vscode/
+.vscode/*
+*.vscode
+!.vscode/settings.json
 *.swp
 *.swo
 *~
@@ -38,3 +52,8 @@ ENV/
 .DS_Store
 Thumbs.db
 
+# Runtime output and local profiling
+*.log
+*.prof
+*.trace
+*.tmp

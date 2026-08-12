@@ -1,0 +1,6 @@
+{
+  "explorer.decorations.badges": true,
+  "explorer.decorations.colors": true,
+  "explorer.excludeGitIgnore": false,
+  "git.decorations.enabled": true
+}

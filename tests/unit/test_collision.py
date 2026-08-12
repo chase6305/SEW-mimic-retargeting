@@ -1,8 +1,15 @@
 import numpy as np
 import pytest
 
-from sew_mimic import Capsule, capsule_contact, closest_points_on_segments
+from sew_mimic import (
+    Capsule,
+    capsule_contact,
+    closest_points_on_segments,
+    cpp_backend_available,
+    minimum_capsule_distance,
+)
 from sew_mimic.collision import _capsule_distances_unchecked
+from sew_mimic.safety import CapsuleRadii, SafetyFilterConfig
 
 
 def test_closest_points_for_crossing_segments():
@@ -50,3 +57,18 @@ def test_vectorized_capsule_distances_match_scalar_kernel():
         ]
     )
     assert np.allclose(batched, scalar, atol=1e-12)
+
+
+@pytest.mark.skipif(not cpp_backend_available(), reason="native extension is not built")
+def test_cpp_minimum_capsule_distance_matches_python():
+    config = SafetyFilterConfig(
+        radii=CapsuleRadii(0.15, 0.07, 0.06, 0.05),
+        torso_start=np.array([0.0, 0.0, 0.3]),
+        torso_end=np.array([0.0, 0.0, 1.2]),
+    )
+    rng = np.random.default_rng(8)
+    for _ in range(100):
+        points = rng.normal(size=(8, 3)) * 0.3 + np.array([0.3, 0.0, 0.8])
+        python_distance = minimum_capsule_distance(points, config, backend="python")
+        cpp_distance = minimum_capsule_distance(points, config, backend="cpp")
+        assert cpp_distance == pytest.approx(python_distance, abs=1e-12)

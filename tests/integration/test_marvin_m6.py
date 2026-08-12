@@ -15,7 +15,7 @@ from examples.demo_robot_viser import (
     retarget_reference_trajectory,
     urdf_reference_keypoint_trajectory,
 )
-from sew_mimic import alignment_diagnostics, sew_mimic
+from sew_mimic import alignment_diagnostics, cpp_backend_available, sew_mimic
 from sew_mimic.robots import (
     DEFAULT_MARVIN_URDF,
     DEFAULT_OPENARM_URDF,
@@ -151,6 +151,19 @@ def test_collision_demo_blocks_unsafe_trajectory():
     assert middle_points[1, 1] > 0.15
     assert middle_points[5, 1] < -0.15
     assert middle_points[3, 1] < 0.0 < middle_points[7, 1]
+
+
+def test_cpp_and_python_safety_paths_enforce_same_clearance():
+    if not cpp_backend_available():
+        pytest.skip("native extension is not built")
+    python_filter = MarvinSafetyFilter(backend="python")
+    cpp_filter = MarvinSafetyFilter(backend="cpp")
+    _, desired_left, desired_right = collision_test_trajectory(duration=2.0, fps=10.0)
+    python_plan = plan_filtered_trajectory(python_filter, desired_left, desired_right)
+    cpp_plan = plan_filtered_trajectory(cpp_filter, desired_left, desired_right)
+    assert np.min(python_plan[3]) >= python_filter.config.minimum_distance
+    assert np.min(cpp_plan[3]) >= cpp_filter.config.minimum_distance
+    assert np.array_equal(python_plan[4], cpp_plan[4])
 
 
 @pytest.mark.skipif(
