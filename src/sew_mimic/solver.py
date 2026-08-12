@@ -28,88 +28,16 @@ from typing import List, Sequence, Tuple
 
 import numpy as np
 
-EPS = 1e-10
-TWO_PI = 2.0 * math.pi
-
-
-class SEWMimicError(RuntimeError):
-    """Base exception for the solver."""
-
-
-class DegenerateGeometryError(SEWMimicError):
-    """Raised for an ill-posed geometric subproblem."""
-
-
-class JointLimitError(SEWMimicError):
-    """Raised when no equivalent analytical solution obeys joint limits."""
-
-
-def _as_vec3(v: Sequence[float]) -> np.ndarray:
-    a = np.asarray(v, dtype=np.float64).reshape(-1)
-    if a.shape != (3,):
-        raise ValueError(f"Expected a 3-vector, got shape {a.shape}")
-    return a
-
-
-def unit(v: Sequence[float], eps: float = EPS) -> np.ndarray:
-    v = _as_vec3(v)
-    n = float(np.linalg.norm(v))
-    if n < eps:
-        raise DegenerateGeometryError("Cannot normalize a near-zero vector")
-    return v / n
-
-
-def skew(v: Sequence[float]) -> np.ndarray:
-    x, y, z = _as_vec3(v)
-    return np.array(
-        [[0.0, -z, y], [z, 0.0, -x], [-y, x, 0.0]],
-        dtype=np.float64,
-    )
-
-
-def rot(k: Sequence[float], theta: float) -> np.ndarray:
-    """Rodrigues rotation R(k, theta)."""
-    k = unit(k)
-    K = skew(k)
-    return np.eye(3) + math.sin(theta) * K + (1.0 - math.cos(theta)) * (K @ K)
-
-
-def wrap_to_pi(theta: float) -> float:
-    return math.atan2(math.sin(theta), math.cos(theta))
-
-
-def _is_rotation_matrix(R: np.ndarray, tol: float = 1e-7) -> bool:
-    R = np.asarray(R, dtype=np.float64)
-    if R.shape != (3, 3):
-        return False
-    return (
-        np.linalg.norm(R.T @ R - np.eye(3), ord="fro") <= tol and abs(np.linalg.det(R) - 1.0) <= tol
-    )
-
-
-def make_frame(
-    keypoint_left: Sequence[float],
-    keypoint_right: Sequence[float],
-    keypoint_bottom: Sequence[float],
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Paper Algorithm 8: create a body-centric frame from 3 keypoints.
-
-    Returns (R, p), where columns of R are front/left/up axes expressed in the
-    input coordinate system, and p is the midpoint of the left/right points.
-
-    Note: the paper's printed Algorithm 8 line 7 shows [ux, uy, uy]; this code
-    uses [ux, uy, uz], which is consistent with lines 4-6 and orthonormality.
-    """
-    kl = _as_vec3(keypoint_left)
-    kr = _as_vec3(keypoint_right)
-    kb = _as_vec3(keypoint_bottom)
-
-    p = 0.5 * (kl + kr)
-    uy = unit(kl - kr)
-    ux = unit(np.cross(uy, p - kb))
-    uz = unit(np.cross(ux, uy))
-    R = np.column_stack((ux, uy, uz))
-    return R, p
+from .utility import (
+    EPS,
+    DegenerateGeometryError,
+    JointLimitError,
+    equivalent_angles_in_limits,
+    rot,
+    unit,
+)
+from .utility import as_vec3 as _as_vec3
+from .utility import is_rotation_matrix as _is_rotation_matrix
 
 
 @dataclass
@@ -354,29 +282,6 @@ def sp2(
 # ---------------------------------------------------------------------------
 # Joint limits and SEW solver
 # ---------------------------------------------------------------------------
-
-
-def equivalent_angles_in_limits(
-    theta: float,
-    q_min: float,
-    q_max: float,
-    reference: float,
-) -> List[float]:
-    """All theta + 2*pi*k values inside limits, sorted by closeness to reference."""
-    theta = float(theta)
-    q_min = float(q_min)
-    q_max = float(q_max)
-    reference = float(reference)
-
-    k_min = math.floor((q_min - theta) / TWO_PI) - 1
-    k_max = math.ceil((q_max - theta) / TWO_PI) + 1
-    vals = []
-    for k in range(k_min, k_max + 1):
-        a = theta + TWO_PI * k
-        if q_min - 1e-10 <= a <= q_max + 1e-10:
-            vals.append(a)
-    vals.sort(key=lambda a: abs(a - reference))
-    return vals
 
 
 def _bound_angle(theta: float, robot: Serial7DoF, idx: int, reference: float) -> float:
