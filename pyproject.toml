@@ -45,6 +45,15 @@ where = ["src"]
 "share/sew-mimic-retargeting/assets/Marvin_M6_S_CCS_696_V4.0/visual/stl" = [
     "assets/Marvin_M6_S_CCS_696_V4.0/visual/stl/*.stl",
 ]
+"share/sew-mimic-retargeting/assets/OpenArm" = ["assets/OpenArm/*.urdf"]
+"share/sew-mimic-retargeting/assets/OpenArm/collision/torso" = ["assets/OpenArm/collision/torso/*.stl"]
+"share/sew-mimic-retargeting/assets/OpenArm/collision/left_arm" = ["assets/OpenArm/collision/left_arm/*.stl"]
+"share/sew-mimic-retargeting/assets/OpenArm/collision/right_arm" = ["assets/OpenArm/collision/right_arm/*.stl"]
+"share/sew-mimic-retargeting/assets/OpenArm/collision/hand" = ["assets/OpenArm/collision/hand/*.stl"]
+"share/sew-mimic-retargeting/assets/OpenArm/visual/torso" = ["assets/OpenArm/visual/torso/*.glb"]
+"share/sew-mimic-retargeting/assets/OpenArm/visual/left_arm" = ["assets/OpenArm/visual/left_arm/*.glb"]
+"share/sew-mimic-retargeting/assets/OpenArm/visual/right_arm" = ["assets/OpenArm/visual/right_arm/*.glb"]
+"share/sew-mimic-retargeting/assets/OpenArm/visual/hand" = ["assets/OpenArm/visual/hand/*.glb"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src", "."]

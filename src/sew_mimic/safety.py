@@ -407,7 +407,6 @@ def sew_safety_filter(
             "SEW safety filter failed to clear collision after %d iterations: distance=%.6f m; returning current pose",
             used_iterations,
             minimum_distance,
-            SafetyFilterStatus.XPBD_FAILED,
         )
         return SafetyFilterResult(
             np.asarray(q_left_current).copy(),
@@ -415,7 +414,7 @@ def sew_safety_filter(
             False,
             used_iterations,
             minimum_distance,
-            SafetyFilterStatus.IK_FAILED,
+            SafetyFilterStatus.XPBD_FAILED,
         )
 
     logger.debug("Safety stage 4/6: recovering tool orientations")
@@ -440,6 +439,7 @@ def sew_safety_filter(
             False,
             used_iterations,
             minimum_distance,
+            SafetyFilterStatus.IK_FAILED,
         )
     logger.debug("Safety stage 6/6: validating reconstructed robot pose")
     reconstructed = forward_kinematics(q_left, q_right)

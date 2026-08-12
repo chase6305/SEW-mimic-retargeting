@@ -3,23 +3,30 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from examples.demo_marvin_collision_avoidance import (
+from examples.demo_robot_collision_avoidance import (
     collision_test_trajectory,
     plan_filtered_trajectory,
 )
-from examples.demo_marvin_viser import (
+from examples.demo_robot_viser import (
     humanlike_reference_trajectory,
     minimum_jerk_trajectory,
+    openarm_reference_trajectory,
     reference_keypoint_trajectory,
     retarget_reference_trajectory,
+    urdf_reference_keypoint_trajectory,
 )
 from sew_mimic import alignment_diagnostics, sew_mimic
 from sew_mimic.robots import (
     DEFAULT_MARVIN_URDF,
+    DEFAULT_OPENARM_URDF,
     MarvinSafetyFilter,
+    OpenArmSafetyFilter,
     URDFKinematics,
+    available_robots,
     estimate_marvin_capsule_config,
     load_marvin_arm,
+    load_openarm_arm,
+    load_robot_arm,
     marvin_bimanual_pose,
 )
 
@@ -136,6 +143,81 @@ def test_collision_demo_blocks_unsafe_trajectory():
     middle_pose = safety_filter.forward_kinematics(
         desired_left[len(desired_left) // 2], desired_right[len(desired_right) // 2]
     )
-    moving_heights = middle_pose.points()[[1, 2, 3, 5, 6, 7], 2]
+    middle_points = middle_pose.points()
+    moving_heights = middle_points[[1, 2, 3, 5, 6, 7], 2]
     assert np.min(moving_heights) > 0.85
     assert np.max(moving_heights) < 1.20
+    # Elbows remain on their natural sides while the forearms cross visibly.
+    assert middle_points[1, 1] > 0.15
+    assert middle_points[5, 1] < -0.15
+    assert middle_points[3, 1] < 0.0 < middle_points[7, 1]
+
+
+@pytest.mark.skipif(
+    not Path(DEFAULT_OPENARM_URDF).is_file(), reason="OpenArm asset is not installed"
+)
+@pytest.mark.parametrize("side", ["left", "right"])
+def test_openarm_urdf_and_demo_trajectory(side):
+    arm = load_openarm_arm(side=side)
+    assert arm.ee_link == f"{side}_hand_base"
+    assert np.max(np.abs(arm.robot.consecutive_axis_dot_products())) < 1e-5
+    _, reference = openarm_reference_trajectory(side, duration=2.0, fps=20.0)
+    target_orientation = arm.robot.tool_orientation(reference[0])
+    orientation_errors = []
+    for q_reference in reference:
+        relative = target_orientation.T @ arm.robot.tool_orientation(q_reference)
+        orientation_errors.append(np.arccos(np.clip((np.trace(relative) - 1.0) * 0.5, -1.0, 1.0)))
+    assert np.max(orientation_errors) < np.deg2rad(15.0)
+    solved, max_error = retarget_reference_trajectory(arm.robot, reference)
+    assert solved.shape == reference.shape
+    assert max_error < 1e-8
+    assert np.all(solved >= arm.robot.q_min - 1e-10)
+    assert np.all(solved <= arm.robot.q_max + 1e-10)
+
+    kinematics = URDFKinematics(DEFAULT_OPENARM_URDF)
+    keypoints = urdf_reference_keypoint_trajectory(kinematics, arm, reference)
+    solved_keypoints = urdf_reference_keypoint_trajectory(kinematics, arm, solved)
+    assert keypoints.shape == (len(reference), 3, 3)
+    assert np.allclose(solved_keypoints, keypoints, atol=1e-10)
+    # The visual target uses the physical J1/J4/hand-base landmarks, including the
+    # real OpenArm link offsets instead of generic human limb lengths.
+    upper_lengths = np.linalg.norm(keypoints[:, 1] - keypoints[:, 0], axis=1)
+    lower_lengths = np.linalg.norm(keypoints[:, 2] - keypoints[:, 1], axis=1)
+    assert np.all((upper_lengths > 0.20) & (upper_lengths < 0.30))
+    assert np.all((lower_lengths > 0.27) & (lower_lengths < 0.33))
+
+
+def test_unified_robot_registry_loads_bundled_adapters():
+    assert available_robots() == ("marvin", "openarm")
+    marvin = load_robot_arm("m6", "left")
+    openarm = load_robot_arm("open-arm", "right")
+    assert marvin.side == "left"
+    assert openarm.side == "right"
+    assert len(marvin.joint_names) == len(openarm.joint_names) == 7
+
+
+@pytest.mark.skipif(
+    not Path(DEFAULT_OPENARM_URDF).is_file(), reason="OpenArm asset is not installed"
+)
+def test_openarm_collision_demo_blocks_unsafe_target():
+    safety_filter = OpenArmSafetyFilter()
+    _, desired_left, desired_right = collision_test_trajectory(
+        duration=2.0, fps=10.0, robot="openarm"
+    )
+    _, _, target_distances, command_distances, accepted = plan_filtered_trajectory(
+        safety_filter, desired_left, desired_right
+    )
+    assert np.min(target_distances) < 0.0
+    assert np.min(command_distances) >= safety_filter.config.minimum_distance
+    assert np.any(~accepted)
+
+    middle_pose = safety_filter.forward_kinematics(
+        desired_left[len(desired_left) // 2], desired_right[len(desired_right) // 2]
+    )
+    middle_points = middle_pose.points()
+    assert middle_points[1, 1] > 0.15
+    assert middle_points[5, 1] < -0.15
+    # The tracked hand bases pass each other at the torso centreline.
+    assert middle_points[3, 1] < 0.0 < middle_points[7, 1]
+    assert np.max(np.abs(middle_points[[3, 7], 1])) < 0.03
+    assert np.all((middle_points[[1, 2, 3, 5, 6, 7], 2] > 0.55))

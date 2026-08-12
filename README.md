@@ -15,7 +15,7 @@ bimanual self-collision safety-filter pipeline.
 - Closed-form seven-DoF arm retargeting without iterative numerical IK.
 - IK-Geo Subproblems 1, 2, and 4.
 - Parallel-wrist `AlignWrist` and joint-limit-aware analytical solution selection.
-- Marvin M6 left/right arm extraction from the bundled URDF.
+- Marvin M6 and OpenArm left/right arm extraction from bundled URDFs.
 - Continuous 60-second dual-arm human-like motion demo.
 - Viser visualization of robot meshes, keypoints, bones, and coordinate frames.
 - Capsule parameters estimated from collision-mesh oriented bounding boxes.
@@ -77,11 +77,11 @@ from sew_mimic.robots import load_marvin_arm
 
 arm = load_marvin_arm(side="left")
 
-q_current = np.zeros(7)                 # radians
-shoulder = np.array([0.0, 0.0, 0.0])   # metres, left_arm_base frame
+q_current = np.zeros(7)  # radians
+shoulder = np.array([0.0, 0.0, 0.0])  # metres, left_arm_base frame
 elbow = np.array([0.20, 0.20, 0.05])
 wrist = np.array([0.45, 0.25, 0.10])
-hand_orientation = np.eye(3)            # valid SO(3) rotation matrix
+hand_orientation = np.eye(3)  # valid SO(3) rotation matrix
 
 q_command = sew_mimic(
     arm.robot,
@@ -92,6 +92,27 @@ q_command = sew_mimic(
     hand_orientation,
 )
 ```
+
+Select OpenArm with the corresponding adapter; the solver API is unchanged:
+
+```python
+from sew_mimic.robots import load_openarm_arm
+
+openarm_left = load_openarm_arm(side="left")
+openarm_right = load_openarm_arm(side="right")
+```
+
+Applications that select robots dynamically can use the unified registry API:
+
+```python
+from sew_mimic.robots import available_robots, load_robot_arm
+
+print(available_robots())  # ("marvin", "openarm")
+arm = load_robot_arm("openarm", side="left")
+```
+
+Aliases such as `m6`, `marvin-m6`, and `open-arm` are accepted by the Python
+registry. A custom URDF path can be passed as the third argument.
 
 The returned Marvin joint order is:
 
@@ -178,10 +199,10 @@ This runs FK from known joint angles, reconstructs corresponding SEW targets,
 and solves them again. Direction and tool-orientation errors should be close to
 floating-point precision.
 
-### Marvin M6 dual-arm motion
+### Robot-selectable dual-arm motion
 
 ```bash
-python examples/demo_marvin_viser.py --side both
+python examples/demo_robot_viser.py --robot marvin --side both
 ```
 
 Default behavior:
@@ -198,7 +219,8 @@ Loop playback          enabled
 Example with explicit settings:
 
 ```bash
-python examples/demo_marvin_viser.py \
+python examples/demo_robot_viser.py \
+  --robot marvin \
   --side both \
   --duration 60 \
   --motion-cycle 60 \
@@ -214,10 +236,29 @@ The interface includes playback controls, fourteen arm joint sliders, human
 keypoints, bone segments, compact joint frames, enlarged end-effector frames,
 and closed-form solver performance metrics.
 
+Run the same visualization with the bundled OpenArm model:
+
+```bash
+python examples/demo_robot_viser.py \
+  --robot openarm \
+  --side both \
+  --duration 60 \
+  --fps 60 \
+  --port 8080
+```
+
+OpenArm uses Cartesian-fitted, joint-limit-safe keyframes designed for its
+asymmetric left/right shoulder ranges. Its program includes readable chest
+opening/crossing, opposing vertical swings, alternating reaches, synchronized
+push/pull, and running-style arm swings. `demo_marvin_viser.py` is only a
+backward-compatible Marvin entry point; new integrations should use
+`demo_robot_viser.py`.
+
 ### Bimanual self-collision avoidance
 
 ```bash
-python examples/demo_marvin_collision_avoidance.py \
+python examples/demo_robot_collision_avoidance.py \
+  --robot marvin \
   --duration 12 \
   --fps 30 \
   --port 8081 \
@@ -230,6 +271,20 @@ through a colliding cross-arm pose. The solid robot displays the command allowed
 by the safety filter. The target never pauses: only the command temporarily
 holds its last safe pose while the target crosses the unsafe region, then
 resumes tracking after the target becomes safe.
+
+Run the same collision-filter visualization with OpenArm and its own STL OOBB
+capsule model:
+
+```bash
+python examples/demo_robot_collision_avoidance.py \
+  --robot openarm \
+  --duration 12 \
+  --fps 30 \
+  --port 8081
+```
+
+`demo_marvin_collision_avoidance.py` remains only as a backward-compatible
+Marvin command shim.
 
 The GUI reports:
 
@@ -321,7 +376,7 @@ import.
 ```python
 from sew_mimic import configure_logging
 
-configure_logging("INFO")   # model loading, OOBB initialization, summaries
+configure_logging("INFO")  # model loading, OOBB initialization, summaries
 # configure_logging("DEBUG")  # per-frame FK, collision, XPBD, and SEW stages
 ```
 
@@ -340,11 +395,15 @@ SEW-mimic-retargeting/
 │   ├── safety.py                      Continuous collision and XPBD filter
 │   └── robots/
 │       ├── marvin_m6.py               Marvin adapter and high-level filter
+│       ├── openarm.py                  OpenArm seven-DoF adapter
+│       ├── registry.py                 Unified robot selection API
 │       └── urdf.py                    Dependency-free general URDF FK
 ├── examples/
 │   ├── demo_toy.py
-│   ├── demo_marvin_viser.py
-│   └── demo_marvin_collision_avoidance.py
+│   ├── demo_robot_viser.py             Multi-robot implementation
+│   ├── demo_marvin_viser.py            Legacy Marvin command shim
+│   ├── demo_robot_collision_avoidance.py Multi-robot collision demo
+│   └── demo_marvin_collision_avoidance.py Legacy Marvin command shim
 ├── tests/
 │   ├── unit/
 │   │   ├── test_solver.py
@@ -356,6 +415,7 @@ SEW-mimic-retargeting/
 │   ├── robot_with_ee.urdf
 │   ├── collision/
 │   └── visual/
+├── assets/OpenArm/                     OpenArm URDF and mesh assets
 ├── docs/media/marvin_viser.gif
 ├── .github/workflows/ci.yml
 └── pyproject.toml

@@ -1,0 +1,29 @@
+<?xml version='1.0' encoding='utf-8'?>
+<robot name="openarm_torso">
+  <!-- Extracted from robot.urdf; mesh paths are relative to the OpenArm directory. -->
+  <link name="torso_base">
+    <visual>
+      <origin rpy="0.0 0.0 0.0" xyz="0.0 0.0 0.0" />
+      <geometry>
+        <mesh filename="visual/torso/torso_base.glb" />
+      </geometry>
+    </visual>
+    <collision>
+      <origin rpy="0.0 0.0 0.0" xyz="0.0 0.0 0.0" />
+      <geometry>
+        <mesh filename="collision/torso/torso_base.stl" />
+      </geometry>
+    </collision>
+    <inertial>
+      <origin rpy="0.0 0.0 0.0" xyz="0.0 0.0 0.0" />
+      <mass value="13.89" />
+      <inertia ixx="1.653" ixy="0.0" ixz="0.0" iyy="1.653" iyz="0.0" izz="0.051" />
+    </inertial>
+  </link>
+  <link name="upper_body_base" />
+  <joint name="UPPER_BODY_BASE" type="fixed">
+    <origin rpy="0 0 0" xyz="0 0 0.698" />
+    <parent link="torso_base" />
+    <child link="upper_body_base" />
+  </joint>
+</robot>
