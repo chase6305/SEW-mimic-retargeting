@@ -3,11 +3,22 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "sew-mimic-reproduction"
+name = "sew-mimic-retargeting"
 version = "0.1.0"
 description = "NumPy reproduction of the core SEW-Mimic geometric retargeting solver"
+readme = "README.md"
 requires-python = ">=3.10"
 dependencies = ["numpy>=1.24"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+[project.urls]
+Repository = "https://github.com/chase6305/SEW-mimic-retargeting"
 
 [project.optional-dependencies]
 test = ["pytest>=7"]

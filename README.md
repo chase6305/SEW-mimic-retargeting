@@ -1,5 +1,7 @@
 # SEW-Mimic Retargeting
 
+[![CI](https://github.com/chase6305/SEW-mimic-retargeting/actions/workflows/ci.yml/badge.svg)](https://github.com/chase6305/SEW-mimic-retargeting/actions/workflows/ci.yml)
+
 A Python/NumPy implementation of the closed-form geometric retargeting method
 from **A Closed-Form Geometric Retargeting Solver for Upper Body Humanoid Robot
 Teleoperation**, with a repository-local Marvin M6 model, dual-arm trajectory
@@ -12,7 +14,7 @@ teleoperation and real-time motion-retargeting prototypes.
 
 ## Demo video
 
-[![Marvin M6 viser demo](docs/media/marvin_viser.gif)](docs/media/marvin_viser.mp4)
+![Marvin M6 viser demo](docs/media/marvin_viser.gif)
 
 ## Features
 
@@ -57,8 +59,8 @@ SEW-mimic-retargeting/
 │   ├── collision/                     Collision meshes
 │   └── visual/                        GLB and STL visual meshes
 ├── docs/media/
-│   ├── marvin_viser.gif               README demo preview
-│   └── marvin_viser.mp4               Higher-quality demo video
+│   └── marvin_viser.gif               README demo preview
+├── .github/workflows/ci.yml            Lint and test automation
 ├── pyproject.toml
 ├── requirements.txt
 └── .gitignore
@@ -121,6 +123,19 @@ Run the same checks without modifying files:
 ```bash
 ruff check src examples tests
 ```
+
+## Testing
+
+Run the complete unit and Marvin M6 integration test suite:
+
+```bash
+pytest
+```
+
+The integration tests load the bundled `robot_with_ee.urdf`, exercise both
+arms, generate reference trajectories, and verify retargeting accuracy and
+joint-limit compliance. GitHub Actions runs formatting, linting, and tests on
+Python 3.10 and 3.12 for every push and pull request.
 
 ## Core API
 
