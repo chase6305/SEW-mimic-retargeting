@@ -2,7 +2,8 @@
 
 [![CI](https://github.com/chase6305/SEW-mimic-retargeting/actions/workflows/ci.yml/badge.svg)](https://github.com/chase6305/SEW-mimic-retargeting/actions/workflows/ci.yml)
 
-A Python/NumPy implementation of the closed-form geometric retargeting method
+A Python reference and high-performance C++ implementation of the closed-form geometric
+retargeting method
 from *A Closed-Form Geometric Retargeting Solver for Upper Body Humanoid Robot
 Teleoperation*. The repository includes the Marvin M6 robot assets, single- and
 dual-arm retargeting, interactive viser demos, and the paper's capsule/XPBD
@@ -13,6 +14,7 @@ bimanual self-collision safety-filter pipeline.
 ## Highlights
 
 - Closed-form seven-DoF arm retargeting without iterative numerical IK.
+- Explicitly selectable Python reference and native C++ backends.
 - IK-Geo Subproblems 1, 2, and 4.
 - Parallel-wrist `AlignWrist` and joint-limit-aware analytical solution selection.
 - Marvin M6 and OpenArm left/right arm extraction from bundled URDFs.
@@ -87,6 +89,15 @@ from sew_mimic import backend_status
 
 print(backend_status())
 # {'default': 'python', 'cpp_available': True, 'cpp_implementation': 'native'}
+```
+
+The installed command also reports package version, platform, registered
+robots, and resolved asset paths:
+
+```bash
+sew-mimic-info
+sew-mimic-info --json
+sew-mimic-info --validate-robots
 ```
 
 A process-wide default can be selected with `SEW_MIMIC_BACKEND`. Build the
@@ -250,47 +261,46 @@ the `RobotArm` protocol. `MarvinArm` and `OpenArmArm` are working examples.
 
 ### 2. Implement and register the arm adapter
 
-Create a robot module outside the core package first. Its loader should parse
-the URDF, verify that the seven named joints form one continuous chain, extract
-axes/origin rotations/limits, accumulate the fixed tool rotation, and construct
-`Serial7DoF`. Avoid embedding calibrated matrices without documenting their
-URDF source.
+Create a robot module outside the core package first. `SerialArmSpec` keeps the
+common case declarative: it parses the URDF, verifies that each set of seven
+named joints forms one continuous chain, extracts axes/origin rotations/limits,
+accumulates the fixed tool rotation, and constructs the solver model. Use the
+lower-level `load_serial_7dof_arm()` helper only when a robot needs a custom arm
+wrapper.
 
 ```python
-from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 
-from sew_mimic import Serial7DoF
-from sew_mimic.robots import RobotAdapter, register_robot_adapter
+from sew_mimic.robots import (
+    RobotAdapter,
+    SerialArmSpec,
+    register_robot_adapter,
+)
 
-
-@dataclass(frozen=True)
-class MyRobotArm:
-    side: str
-    robot: Serial7DoF
-    joint_names: tuple[str, ...]
-    base_link: str
-    ee_link: str
-
-
-def load_my_robot_arm(urdf_path: str | Path, side: str) -> MyRobotArm:
-    # Parse and validate the URDF here. See load_openarm_arm() for a complete
-    # implementation including topology and fixed-tool-chain checks.
-    axes_local = np.asarray(...)       # (7, 3)
-    origin_rotations = np.asarray(...) # (7, 3, 3)
-    q_min, q_max = np.asarray(...), np.asarray(...)
-    tool_rotation = np.asarray(...)    # (3, 3)
-    model = Serial7DoF(
-        axes_local=axes_local,
-        R_local=origin_rotations,
-        q_min=q_min,
-        q_max=q_max,
-        R_7T_local=tool_rotation,
-        R_align=np.eye(3),
-    )
-    return MyRobotArm(side, model, tuple(...), "arm_base", "hand_base")
+ARM_SPEC = SerialArmSpec(
+    left_joint_names=(
+        "left_j1",
+        "left_j2",
+        "left_j3",
+        "left_j4",
+        "left_j5",
+        "left_j6",
+        "left_j7",
+    ),
+    right_joint_names=(
+        "right_j1",
+        "right_j2",
+        "right_j3",
+        "right_j4",
+        "right_j5",
+        "right_j6",
+        "right_j7",
+    ),
+    left_ee_link="left_hand_base",
+    right_ee_link="right_hand_base",
+)
 
 
 def my_reference_trajectory(side, duration, fps, cycle_duration=None):
@@ -305,7 +315,7 @@ register_robot_adapter(
         name="my-robot",
         display_name="My Robot",
         default_urdf=Path("assets/MyRobot/robot.urdf"),
-        load_arm=load_my_robot_arm,
+        load_arm=ARM_SPEC.load,
         trajectory_profile=my_reference_trajectory,
         keypoint_profile="urdf",
     ),
@@ -339,6 +349,20 @@ python my_robot_viser.py --robot my-robot --backend cpp --side both
 
 ### 3. Validate retargeting before safety
 
+Run the generic adapter acceptance check first:
+
+```python
+from sew_mimic.robots import validate_robot_adapter
+
+report = validate_robot_adapter("my-robot")
+print(report)
+```
+
+It loads both arms, chooses the closest-to-zero joint-limit-valid neutral pose,
+evaluates bimanual FK, validates finite keypoints and both tool SO(3) matrices,
+summarizes the narrowest joint range, and reports the largest consecutive-axis
+dot product. The same check is available through `sew-mimic-info --validate-robots`.
+
 Use known robot configurations as ground truth. For each test pose, obtain the
 shoulder/elbow/wrist directions and tool orientation from FK, solve from a
 nearby `q0`, and check `alignment_diagnostics()`. Include neutral, bent-elbow,
@@ -361,16 +385,97 @@ the initial `q0`.
 
 Safety integration is robot-specific because mesh names, torso placement, and
 valid collision pairs differ. Fit conservative capsules from collision-mesh
-OOBBs with `capsule_from_oobb()`, then create one cached `SafetyFilterConfig`.
-Use the longest OOBB axis for each capsule segment and the larger fitted radius
-across corresponding left/right links. Keep adjacent-link and physical
-attachment pairs excluded.
+OOBBs by declaring a `CapsuleMeshSpec` and calling
+`estimate_capsule_config_from_meshes()`. The helper fits every unique mesh once,
+uses the longest OOBB axis for each capsule, selects the largest radius in each
+link group, and transforms the torso capsule into the URDF root frame.
 
-The high-level wrapper must provide three callbacks to `sew_safety_filter()`:
+```python
+from sew_mimic.robots import CapsuleMeshSpec, estimate_capsule_config_from_meshes
 
-1. bimanual URDF FK returning `BimanualPose` in one root frame;
-1. a left-arm SEW solve that transforms projected points into the left base;
-1. a right-arm SEW solve that transforms projected points into the right base.
+mesh_spec = CapsuleMeshSpec(
+    torso="torso/torso.stl",
+    upper_arm=("arm/upper_left.stl", "arm/upper_right.stl"),
+    lower_arm=("arm/lower_left.stl", "arm/lower_right.stl"),
+    hand=("hand/left.stl", "hand/right.stl"),
+    torso_link="torso",
+)
+my_capsule_config = estimate_capsule_config_from_meshes(
+    robot_urdf,
+    robot_urdf.parent / "collision",
+    mesh_spec,
+    padding=1.05,
+)
+```
+
+Keep adjacent-link and physical attachment pairs excluded when customizing the
+resulting `SafetyFilterConfig.collision_pairs`.
+
+Use `RobotSafetyFilter` for the shared orchestration. A new robot only needs to
+provide its left/right `RobotArm` instances, parsed `URDFKinematics`, capsule
+configuration, and one bimanual FK function returning `BimanualPose` in the
+URDF root frame:
+
+```python
+from sew_mimic.robots import RobotSafetyFilter, URDFKinematics, urdf_bimanual_pose
+
+kinematics = URDFKinematics(robot_urdf)
+safety_filter = RobotSafetyFilter(
+    robot_urdf,
+    left=load_my_robot_arm(robot_urdf, "left"),
+    right=load_my_robot_arm(robot_urdf, "right"),
+    kinematics=kinematics,
+    config=my_capsule_config,
+    pose_function=urdf_bimanual_pose,
+    backend="cpp",
+)
+```
+
+`RobotSafetyFilter` owns base-frame conversion, left/right SEW callbacks,
+backend dispatch, failure handling, and the callable `filter()` interface. A
+named robot class may subclass it to package asset loading and OOBB estimation;
+`MarvinSafetyFilter` and `OpenArmSafetyFilter` follow this pattern.
+Their real-time FK path uses `URDFBimanualPoseEvaluator`, which resolves the
+shoulder, elbow, wrist, tool, and required URDF branches once during filter
+construction. `URDFKinematics` also caches an ordered FK execution plan for
+those branches, so unrelated fingers, sensors, and fixed links are not visited
+on every frame. Custom filters can reuse the same evaluator when they follow
+the standard J1/J4/J6 landmark convention.
+`urdf_bimanual_pose()` uses the standard J1/J4/J6 shoulder/elbow/wrist
+landmarks; pass different landmark indices or a custom pose function when a
+robot's mechanical convention differs.
+
+To make the generic collision demo discover the integration, attach the filter
+class and four validation endpoints to `RobotAdapter`:
+
+```python
+from sew_mimic.robots import CollisionDemoProfile
+
+collision_profile = CollisionDemoProfile(
+    neutral_left=q_left_safe,
+    neutral_right=q_right_safe,
+    colliding_left=q_left_crossed,
+    colliding_right=q_right_crossed,
+)
+
+register_robot_adapter(
+    RobotAdapter(
+        name="my-robot",
+        display_name="My Robot",
+        default_urdf=robot_urdf,
+        load_arm=load_my_robot_arm,
+        trajectory_profile=my_reference_trajectory,
+        safety_filter_factory=MyRobotSafetyFilter,
+        collision_profile=collision_profile,
+    ),
+    replace=True,
+)
+```
+
+The collision endpoints must be finite seven-joint vectors. The generated
+minimum-jerk trajectory moves continuously from neutral through the colliding
+pose and back without pausing. Once registered, `demo_robot_collision_avoidance.py`
+uses these capabilities without a robot-name branch.
 
 Cache URDF parsing, zero-pose base transforms, OOBB results, collision-pair
 indices, and capsule radii during initialization. In the per-frame path, request
@@ -411,9 +516,9 @@ WRIST_ROLL
 ```python
 import numpy as np
 
-from sew_mimic.robots import MarvinSafetyFilter
+from sew_mimic.robots import create_robot_safety_filter
 
-safety_filter = MarvinSafetyFilter(padding=1.05)
+safety_filter = create_robot_safety_filter("marvin", padding=1.05, backend="cpp")
 
 result = safety_filter.filter(
     q_left_current=np.zeros(7),
@@ -428,10 +533,13 @@ q_right_command = result.q_right
 print(result.safe)
 print(result.status.value)
 print(result.minimum_distance)  # metres; negative means capsule penetration
+print(result.desired_minimum_distance)  # unfiltered target clearance
+print(result.command_minimum_distance)  # clearance of returned command
 print(result.iterations)
 ```
 
-`MarvinSafetyFilter(...)` is also callable directly and delegates to `filter()`.
+The returned filter is callable directly and delegates to `filter()`. The same
+entry point accepts any registered robot that supplies `safety_filter_factory`.
 
 Safety-filter statuses:
 
@@ -466,6 +574,37 @@ elbow_arm = R_arm_world @ (elbow_world - p_world_arm)
 wrist_arm = R_arm_world @ (wrist_world - p_world_arm)
 hand_orientation_arm = R_arm_world @ hand_orientation_world
 ```
+
+## Real-time filtering
+
+Noisy tracking input and actuator command limits are handled outside the
+closed-form solver. `BimanualPoseFilter` applies a One Euro filter to all eight
+keypoints and shortest-arc quaternion filtering to both tool orientations, so
+its orientation outputs remain valid SO(3) matrices. `OneEuroFilter` is also
+available independently for scalar or Euclidean observations.
+
+```python
+from sew_mimic import BimanualPoseFilter, JointRateLimiter
+
+tracking_filter = BimanualPoseFilter(min_cutoff=1.0, beta=0.02)
+filtered_pose = tracking_filter.update(timestamp, measured_bimanual_pose)
+
+command_filter = JointRateLimiter(max_velocity=robot_velocity_limits)
+command_filter.reset(current_joint_command, timestamp)
+limited_command = command_filter.update(next_timestamp, desired_joint_command)
+```
+
+Keep rotation validation enabled for external tracking data. If the pose comes
+directly from a validated FK implementation, use
+`BimanualPoseFilter(validate_rotations=False)` to avoid two redundant SO(3)
+checks per frame; this is a trusted-input optimization and must not be used to
+accept arbitrary matrices.
+
+The recommended online order is tracking/keypoint filtering, SEW retargeting,
+self-collision filtering, and joint-rate limiting. If rate limiting materially
+changes a collision-corrected command, perform a final collision check before
+sending it to hardware. Call `reset()` after tracking loss, emergency stop, or
+controller reconnection; timestamps must be finite and strictly increasing.
 
 ## Demos
 
@@ -654,7 +793,7 @@ not two independently counted arm solves.
 
 ### Reference hardware
 
-The following results were measured on 2026-08-12. They are reference values,
+The following results were measured on 2026-08-15. They are reference values,
 not guaranteed real-time deadlines.
 
 | Component        | Reference system                                |
@@ -666,20 +805,22 @@ not guaranteed real-time deadlines.
 | Python stack     | Python 3.10.0, NumPy 2.2.6, pybind11 3.1.0      |
 
 The benchmark runs in one Python process with logging disabled. It uses 20,000
-timed calls for each microbenchmark and one pass over the included 12-second,
-30 Hz collision trajectory for the full safety test. CPU frequency scaling and
-other system load were not pinned, so small run-to-run variation is expected.
+timed calls for each microbenchmark and three passes over the included
+12-second, 30 Hz collision trajectory for the full safety test. Reported values
+are medians across three repeats; the command also prints the observed latency
+range. CPU frequency scaling and other system load were not pinned, so
+small run-to-run variation is expected.
 
 ### Reference results
 
 | Workload                                |  Python throughput |  Python latency |     C++ throughput |     C++ latency | C++ speedup |
 | --------------------------------------- | -----------------: | --------------: | -----------------: | --------------: | ----------: |
-| Single-arm SEW solve                    |   1,080.7 solves/s | 0.9253 ms/solve | 227,170.2 solves/s | 0.0044 ms/solve |      210.2x |
-| Seven-capsule bimanual minimum distance | 20,358.0 queries/s | 0.0491 ms/query | 53,828.8 queries/s | 0.0186 ms/query |        2.6x |
-| Complete bimanual safety frame          |     524.7 frames/s | 1.9060 ms/frame |   3,498.7 frames/s | 0.2858 ms/frame |        6.7x |
+| Single-arm SEW solve                    |   1,050.8 solves/s | 0.9516 ms/solve | 223,628.9 solves/s | 0.0045 ms/solve |      212.8x |
+| Seven-capsule bimanual minimum distance | 20,222.0 queries/s | 0.0495 ms/query | 61,311.6 queries/s | 0.0163 ms/query |        3.0x |
+| Complete bimanual safety frame          |     580.5 frames/s | 1.7226 ms/frame |   8,306.5 frames/s | 0.1204 ms/frame |       14.3x |
 
 At a 60 Hz control target, the complete safety pipeline provides approximately
-`8.7x` real-time throughput with the Python backend and `58.3x` with the C++
+`9.7x` real-time throughput with the Python backend and `138.4x` with the C++
 backend on this reference system. These figures exclude visualization, robot
 communication, and sensor preprocessing. The full safety result also includes
 Python-side URDF FK and orchestration, so it does not represent only native C++
@@ -688,7 +829,7 @@ execution time.
 Reproduce the table after installing the project with its native extension:
 
 ```bash
-python -m benchmarks.benchmark_backends --iterations 20000 --trajectory-fps 30
+python -m benchmarks.benchmark_backends --iterations 20000 --trajectory-fps 30 --repeats 3
 ```
 
 ### Jetson Orin NX status
@@ -773,7 +914,12 @@ SEW-mimic-retargeting/
 │   └── robots/
 │       ├── marvin_m6.py               Marvin adapter and high-level filter
 │       ├── openarm.py                  OpenArm seven-DoF adapter
+│       ├── arm_loader.py               Generic serial seven-DoF URDF extraction
+│       ├── capsule_config.py            Generic mesh-OOBB capsule estimation
 │       ├── registry.py                 Unified robot selection API
+│       ├── demo_profiles.py            Registered collision validation paths
+│       ├── pose.py                     Generic bimanual URDF landmark extraction
+│       ├── safety_filter.py            Shared bimanual safety orchestration
 │       └── urdf.py                    Dependency-free general URDF FK
 ├── examples/
 │   ├── demo_toy.py
@@ -816,19 +962,31 @@ pytest -q tests/integration
 Format and lint:
 
 ```bash
-ruff format src examples tests
+ruff format src examples benchmarks scripts tests setup.py
 mdformat README.md
-ruff check src examples tests
+clang-format -i src/cpp/sew_mimic_cpp.cpp
+ruff check src examples benchmarks scripts tests setup.py
+clang-format --dry-run --Werror src/cpp/sew_mimic_cpp.cpp
 ```
 
-Build a wheel containing the Marvin assets:
+Build a wheel containing the bundled Marvin and OpenArm assets:
 
 ```bash
 python -m build --wheel
+python scripts/verify_wheel.py dist/*.whl --assets assets --expect-pure
 ```
 
-GitHub Actions checks Python and Markdown formatting, runs all tests, and builds
-wheels on Python 3.10 and 3.12 for every push and pull request.
+After installing the wheel into a virtual environment, run the installed-package
+smoke test from outside the repository:
+
+```bash
+cd /tmp
+/path/to/venv/bin/python /path/to/repository/scripts/smoke_test_install.py
+```
+
+GitHub Actions checks Python, C++, and Markdown formatting, runs the reference
+and native parity tests, verifies packaged robot assets, and builds Python and
+native wheels on every push and pull request.
 
 ## Current limitations
 

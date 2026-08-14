@@ -13,67 +13,28 @@ from pathlib import Path
 
 import numpy as np
 
-from sew_mimic import configure_logging, minimum_capsule_distance
+from sew_mimic import configure_logging
 from sew_mimic.robots import (
-    MarvinSafetyFilter,
-    OpenArmSafetyFilter,
+    RobotSafetyFilter,
     available_robots,
+    create_robot_safety_filter,
+    get_robot_adapter,
     resolve_robot_urdf,
 )
-
-# These robot-specific joint keyframes were fitted from common Cartesian
-# elbow, wrist, and tool targets. Both robots therefore perform the same
-# readable motion despite their different joint conventions: a relaxed
-# chest-level guard moves into a deliberate cross-arm reach at the centreline.
-NEUTRAL_LEFT = np.array([-2.58915, 0.51915, 2.60269, -1.76463, 0.97923, 0.70662, -0.64099])
-NEUTRAL_RIGHT = np.array([-0.55240, -0.51914, 0.53884, -1.76463, 2.48376, -0.84185, -0.41466])
-COLLIDING_LEFT = np.array([-2.87488, 1.38313, 2.89654, -1.29803, 1.05635, 0.78405, -0.64147])
-COLLIDING_RIGHT = np.array([-0.26671, -1.38313, 0.24503, -1.29803, 2.55556, -0.93924, -0.28068])
-
-OPENARM_NEUTRAL_LEFT = np.array([-1.26172, -0.92937, 1.19838, 1.33681, 1.57079, -0.46509, -0.52772])
-OPENARM_NEUTRAL_RIGHT = np.array([0.90530, 0.80607, -1.00774, 1.32608, 1.57079, -0.43390, 0.72121])
-OPENARM_COLLIDING_LEFT = np.array(
-    [-1.49687, -0.20808, 1.44850, 1.26534, 1.57079, -0.73129, -0.32459]
-)
-OPENARM_COLLIDING_RIGHT = np.array(
-    [1.20158, 0.15643, -1.37080, 1.25447, 1.57079, -0.68932, 0.57426]
-)
-
-
-def minimum_jerk(value: np.ndarray) -> np.ndarray:
-    return 10.0 * value**3 - 15.0 * value**4 + 6.0 * value**5
 
 
 def collision_test_trajectory(
     duration: float, fps: float, robot: str = "marvin"
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """One continuous open -> collide -> open motion with no target pause."""
-    if duration <= 0.0 or fps <= 0.0:
-        raise ValueError("duration and fps must be positive")
-    times = np.linspace(0.0, duration, int(np.ceil(duration * fps)) + 1)
-    phase = times / duration
-    # The target never stops. Only the filtered robot pauses at the safety
-    # boundary while the unsafe target passes through the collision region.
-    blend = np.where(
-        phase <= 0.5,
-        minimum_jerk(2.0 * phase),
-        minimum_jerk(2.0 * (1.0 - phase)),
-    )
-    if robot == "marvin":
-        neutral_left, neutral_right = NEUTRAL_LEFT, NEUTRAL_RIGHT
-        colliding_left, colliding_right = COLLIDING_LEFT, COLLIDING_RIGHT
-    elif robot == "openarm":
-        neutral_left, neutral_right = OPENARM_NEUTRAL_LEFT, OPENARM_NEUTRAL_RIGHT
-        colliding_left, colliding_right = OPENARM_COLLIDING_LEFT, OPENARM_COLLIDING_RIGHT
-    else:
-        raise ValueError(f"Unsupported collision-demo robot: {robot}")
-    left = neutral_left + blend[:, None] * (colliding_left - neutral_left)
-    right = neutral_right + blend[:, None] * (colliding_right - neutral_right)
-    return times, left, right
+    profile = get_robot_adapter(robot).collision_profile
+    if profile is None:
+        raise ValueError(f"Robot {robot!r} has no collision demo profile")
+    return profile.trajectory(duration, fps)
 
 
 def plan_filtered_trajectory(
-    safety_filter: MarvinSafetyFilter | OpenArmSafetyFilter,
+    safety_filter: RobotSafetyFilter,
     desired_left: np.ndarray,
     desired_right: np.ndarray,
     solve_timings: list[float] | None = None,
@@ -87,10 +48,6 @@ def plan_filtered_trajectory(
     current_left, current_right = desired_left[0].copy(), desired_right[0].copy()
 
     for index, (target_left, target_right) in enumerate(zip(desired_left, desired_right)):
-        target_pose = safety_filter.forward_kinematics(target_left, target_right)
-        target_distances[index] = minimum_capsule_distance(
-            target_pose.points(), safety_filter.config, backend=safety_filter.backend
-        )
         solve_start = time.perf_counter()
         result = safety_filter(current_left, current_right, target_left, target_right)
         solve_elapsed = time.perf_counter() - solve_start
@@ -99,10 +56,10 @@ def plan_filtered_trajectory(
         current_left, current_right = result.q_left, result.q_right
         safe_left[index], safe_right[index] = current_left, current_right
         accepted[index] = result.safe
-        command_pose = safety_filter.forward_kinematics(current_left, current_right)
-        command_distances[index] = minimum_capsule_distance(
-            command_pose.points(), safety_filter.config, backend=safety_filter.backend
-        )
+        if result.desired_minimum_distance is None or result.command_minimum_distance is None:
+            raise RuntimeError("safety filter did not report clearance diagnostics")
+        target_distances[index] = result.desired_minimum_distance
+        command_distances[index] = result.command_minimum_distance
     return safe_left, safe_right, target_distances, command_distances, accepted
 
 
@@ -134,10 +91,16 @@ def main() -> None:
 
     logger = logging.getLogger(__name__)
     logger.info("Collision-avoidance demo planning started")
-    filter_classes = {"marvin": MarvinSafetyFilter, "openarm": OpenArmSafetyFilter}
-    safety_filter = filter_classes[args.robot](
-        args.urdf, padding=args.padding, backend=args.backend
+    adapter = get_robot_adapter(args.robot)
+    if adapter.safety_filter_factory is None or adapter.collision_profile is None:
+        raise SystemExit(
+            f"Robot {args.robot!r} does not provide a safety filter and collision profile"
+        )
+    safety_filter = create_robot_safety_filter(
+        args.robot, args.urdf, padding=args.padding, backend=args.backend
     )
+    if not isinstance(safety_filter, RobotSafetyFilter):
+        raise TypeError("collision demo safety filters must inherit RobotSafetyFilter")
     times, desired_left, desired_right = collision_test_trajectory(
         args.duration, args.fps, args.robot
     )

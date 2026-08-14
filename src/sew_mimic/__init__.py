@@ -1,5 +1,12 @@
 """Closed-form SEW-Mimic retargeting for seven-DoF humanoid arms."""
 
+from importlib.metadata import PackageNotFoundError, version
+
+try:
+    __version__ = version("sew-mimic-retargeting")
+except PackageNotFoundError:  # Running directly from an unpacked source tree.
+    __version__ = "0+unknown"
+
 from .backends import (
     CppBackend,
     CppCollisionBackend,
@@ -17,6 +24,12 @@ from .collision import (
     capsule_contact,
     capsule_from_oobb,
     closest_points_on_segments,
+)
+from .filtering import (
+    BimanualPoseFilter,
+    JointRateLimiter,
+    OneEuroFilter,
+    OneEuroRotationFilter,
 )
 from .safety import (
     ArmPose,
@@ -57,14 +70,19 @@ from .utility import (
 )
 
 __all__ = [
+    "__version__",
     "ArmPose",
     "BimanualPose",
+    "BimanualPoseFilter",
     "Capsule",
     "CapsuleContact",
     "CapsuleRadii",
     "CapsuleIndex",
     "DegenerateGeometryError",
     "JointLimitError",
+    "JointRateLimiter",
+    "OneEuroFilter",
+    "OneEuroRotationFilter",
     "SEWMimicError",
     "SafetyFilterConfig",
     "SafetyFilterResult",

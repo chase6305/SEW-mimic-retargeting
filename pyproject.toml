@@ -5,20 +5,31 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "sew-mimic-retargeting"
 version = "0.1.0"
-description = "NumPy reproduction of the core SEW-Mimic geometric retargeting solver"
+description = "Closed-form Python/C++ retargeting and self-collision filtering for humanoid robots"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = ["numpy>=1.24"]
+keywords = ["humanoid", "retargeting", "robotics", "teleoperation", "inverse-kinematics"]
 classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: C++",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 
 [project.urls]
 Repository = "https://github.com/chase6305/SEW-mimic-retargeting"
+Issues = "https://github.com/chase6305/SEW-mimic-retargeting/issues"
+Paper = "https://doi.org/10.48550/arXiv.2602.01632"
+
+[project.scripts]
+sew-mimic-info = "sew_mimic.cli:main"
 
 [project.optional-dependencies]
 test = ["pytest>=7"]
@@ -39,6 +50,10 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+include = ["sew_mimic*"]
+
+[tool.setuptools.package-data]
+sew_mimic = ["py.typed"]
 
 [tool.setuptools.data-files]
 "share/sew-mimic-retargeting/assets/Marvin_M6_S_CCS_696_V4.0" = [

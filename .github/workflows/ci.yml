@@ -25,14 +25,22 @@ jobs:
         run: python -m pip install -e '.[dev,visualization,safety]'
       - name: Check formatting
         run: |
-          ruff format --check src examples tests
+          ruff format --check src examples benchmarks scripts tests setup.py
           mdformat --check README.md
       - name: Lint
-        run: ruff check src examples tests
+        run: ruff check src examples benchmarks scripts tests setup.py
       - name: Test
         run: pytest
-      - name: Build wheel with bundled Marvin assets
+      - name: Build wheel with bundled robot assets
         run: python -m build --wheel
+      - name: Verify wheel package and robot assets
+        run: python scripts/verify_wheel.py dist/*.whl --assets assets --expect-pure
+      - name: Smoke-test pure wheel in isolation
+        run: |
+          python -m venv /tmp/sew-pure-wheel
+          /tmp/sew-pure-wheel/bin/python -m pip install dist/*.whl
+          cd /tmp
+          /tmp/sew-pure-wheel/bin/python "$GITHUB_WORKSPACE/scripts/smoke_test_install.py"
 
   native:
     runs-on: ubuntu-latest
@@ -43,7 +51,7 @@ jobs:
           python-version: "3.10"
           cache: pip
       - name: Install native development environment
-        run: python -m pip install -e '.[dev,cpp,visualization,safety]'
+        run: python -m pip install -e '.[dev,cpp-dev,visualization,safety]'
         env:
           SEW_MIMIC_BUILD_CPP: "1"
       - name: Verify native extension identity
@@ -56,9 +64,11 @@ jobs:
         run: python -m build --wheel
         env:
           SEW_MIMIC_BUILD_CPP: "1"
+      - name: Verify native wheel package and robot assets
+        run: python scripts/verify_wheel.py dist/*.whl --assets assets --expect-native
       - name: Verify native wheel in isolation
         run: |
           python -m venv /tmp/sew-native-wheel
           /tmp/sew-native-wheel/bin/python -m pip install dist/*.whl
           cd /tmp
-          /tmp/sew-native-wheel/bin/python -c "from sew_mimic import backend_status; from sew_mimic.robots import DEFAULT_MARVIN_URDF, DEFAULT_OPENARM_URDF; assert backend_status()['cpp_implementation'] == 'native'; assert DEFAULT_MARVIN_URDF.is_file() and DEFAULT_OPENARM_URDF.is_file()"
+          /tmp/sew-native-wheel/bin/python "$GITHUB_WORKSPACE/scripts/smoke_test_install.py" --expect-native

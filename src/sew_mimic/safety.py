@@ -150,7 +150,10 @@ class SafetyFilterConfig:
         if any(first < 0 or second > 6 or first >= second for first, second in normalized):
             raise ValueError("collision pairs must satisfy 0 <= first < second <= 6")
         object.__setattr__(self, "collision_pairs", normalized)
-        pair_indices = np.asarray(normalized, dtype=np.intp)
+        # The native ABI consumes int32. NumPy also accepts it for advanced
+        # indexing, so storing this representation avoids a conversion and
+        # allocation on every C++ collision/XPBD call.
+        pair_indices = np.asarray(normalized, dtype=np.int32)
         pair_indices.flags.writeable = False
         object.__setattr__(self, "collision_pair_indices", pair_indices)
 
@@ -187,6 +190,8 @@ class SafetyFilterResult:
     iterations: int
     minimum_distance: float
     status: SafetyFilterStatus = SafetyFilterStatus.ACCEPTED
+    desired_minimum_distance: float | None = None
+    command_minimum_distance: float | None = None
 
     @property
     def modified(self) -> bool:
@@ -265,17 +270,18 @@ def minimum_capsule_distance(
     points = np.asarray(points, dtype=np.float64)
     if points.shape != (8, 3) or not np.all(np.isfinite(points)):
         raise ValueError("Bimanual point arrays must be finite and have shape (8, 3)")
-    starts, ends, radii = _capsule_arrays(points, config)
     assert config.collision_pairs is not None
     if backend == "cpp":
-        return get_cpp_collision_backend().minimum_distance(
-            starts,
-            ends,
-            radii,
+        return get_cpp_collision_backend().minimum_bimanual_distance(
+            points,
+            config.torso_start,
+            config.torso_end,
+            config.capsule_radii,
             config.collision_pair_indices,
         )
     if backend != "python":
         raise ValueError("backend must be one of: python, cpp")
+    starts, ends, radii = _capsule_arrays(points, config)
     first = config.collision_pair_indices[:, 0]
     second = config.collision_pair_indices[:, 1]
     distances = _capsule_distances_unchecked(
@@ -302,12 +308,29 @@ def find_first_collision(
     desired = np.asarray(desired_points, dtype=np.float64)
     if initial.shape != (8, 3) or desired.shape != (8, 3):
         raise ValueError("Bimanual point arrays must have shape (8, 3)")
-    ratios = np.linalg.norm(desired - initial, axis=1) / config.interpolation_point_radii
+    if backend == "cpp":
+        return get_cpp_collision_backend().first_collision(
+            initial,
+            desired,
+            config.torso_start,
+            config.torso_end,
+            config.capsule_radii,
+            config.interpolation_point_radii,
+            config.collision_pair_indices,
+            activation_distance=config.activation_distance,
+            interpolation_limit=config.interpolation_limit,
+        )
+    if backend != "python":
+        raise ValueError("backend must be one of: python, cpp")
+    displacement = desired - initial
+    ratios = np.linalg.norm(displacement, axis=1) / config.interpolation_point_radii
     samples = int(np.clip(np.ceil(np.max(ratios)), 1, config.interpolation_limit))
     logger.debug("Continuous collision check sampling: samples=%d", samples)
     last = desired
-    for sample_index, fraction in enumerate(np.linspace(0.0, 1.0, samples + 1)[1:], 1):
-        candidate = initial + fraction * (desired - initial)
+    inverse_samples = 1.0 / samples
+    for sample_index in range(1, samples + 1):
+        fraction = sample_index * inverse_samples
+        candidate = initial + fraction * displacement
         last = candidate
         distance = minimum_capsule_distance(candidate, config, backend=backend)
         if distance < config.activation_distance:
@@ -321,7 +344,10 @@ def find_first_collision(
             break
     else:
         logger.debug("Continuous collision check completed without activation")
-    return last.copy()
+    # ``last`` is always a freshly allocated interpolation candidate because
+    # ``samples`` is clamped to at least one; returning it directly preserves
+    # ownership without one more (8, 3) copy.
+    return last
 
 
 def _project_lengths(points: np.ndarray, lengths: np.ndarray, compliance: float) -> None:
@@ -454,18 +480,17 @@ def sew_safety_filter(
             0,
             desired_minimum,
             SafetyFilterStatus.ACCEPTED,
+            desired_minimum,
+            desired_minimum,
         )
     logger.debug("Unsafe target detected; computing current-pose forward kinematics")
     current_pose = forward_kinematics(q_left_current, q_right_current)
     current_points = current_pose.keypoints()
     logger.debug("Safety stage 2/6: continuous-time collision approximation")
     points = find_first_collision(current_points, desired_points, config, backend=backend)
-    lengths = np.linalg.norm(points[[1, 2, 3, 5, 6, 7]] - points[[0, 1, 2, 4, 5, 6]], axis=1)
     assert config.collision_pairs is not None
-    multipliers = np.zeros(len(config.collision_pairs))
 
     logger.debug("Safety stage 3/6: XPBD collision and link-length projection")
-    minimum_distance = minimum_capsule_distance(points, config, backend=backend)
     used_iterations = 0
     if backend == "cpp":
         points, used_iterations, minimum_distance = get_cpp_collision_backend().project_xpbd(
@@ -482,6 +507,9 @@ def sew_safety_filter(
             iterations=config.iterations,
         )
     else:
+        lengths = np.linalg.norm(points[[1, 2, 3, 5, 6, 7]] - points[[0, 1, 2, 4, 5, 6]], axis=1)
+        multipliers = np.zeros(len(config.collision_pairs))
+        minimum_distance = minimum_capsule_distance(points, config, backend=backend)
         for used_iterations in range(1, config.iterations + 1):
             if minimum_distance >= config.minimum_distance - config.tolerance:
                 break
@@ -507,6 +535,8 @@ def sew_safety_filter(
             used_iterations,
             minimum_distance,
             SafetyFilterStatus.XPBD_FAILED,
+            desired_minimum,
+            minimum_capsule_distance(current_points, config, backend=backend),
         )
 
     logger.debug("Safety stage 4/6: recovering tool orientations")
@@ -532,6 +562,8 @@ def sew_safety_filter(
             used_iterations,
             minimum_distance,
             SafetyFilterStatus.IK_FAILED,
+            desired_minimum,
+            minimum_capsule_distance(current_points, config, backend=backend),
         )
     logger.debug("Safety stage 6/6: validating reconstructed robot pose")
     reconstructed = forward_kinematics(q_left, q_right)
@@ -550,6 +582,8 @@ def sew_safety_filter(
             used_iterations,
             reconstructed_distance,
             SafetyFilterStatus.VALIDATION_FAILED,
+            desired_minimum,
+            minimum_capsule_distance(current_points, config, backend=backend),
         )
     logger.debug(
         "SEW safety filter completed: iterations=%d minimum_distance=%.6f m",
@@ -563,4 +597,6 @@ def sew_safety_filter(
         used_iterations,
         reconstructed_distance,
         SafetyFilterStatus.CORRECTED,
+        desired_minimum,
+        reconstructed_distance,
     )

@@ -175,9 +175,48 @@ class CppCollisionBackend:
         radii: np.ndarray,
         pairs: np.ndarray,
     ) -> float:
+        return float(self._native.minimum_capsule_distance(starts, ends, radii, pairs))
+
+    def minimum_bimanual_distance(
+        self,
+        points: np.ndarray,
+        torso_start: np.ndarray,
+        torso_end: np.ndarray,
+        radii: np.ndarray,
+        pairs: np.ndarray,
+    ) -> float:
+        """Query the standard seven capsules without Python-side assembly."""
         return float(
-            self._native.minimum_capsule_distance(
-                starts, ends, radii, np.asarray(pairs, dtype=np.int32)
+            self._native.minimum_bimanual_capsule_distance(
+                points, torso_start, torso_end, radii, pairs
+            )
+        )
+
+    def first_collision(
+        self,
+        initial: np.ndarray,
+        desired: np.ndarray,
+        torso_start: np.ndarray,
+        torso_end: np.ndarray,
+        radii: np.ndarray,
+        point_radii: np.ndarray,
+        pairs: np.ndarray,
+        *,
+        activation_distance: float,
+        interpolation_limit: int,
+    ) -> np.ndarray:
+        """Run continuous bimanual capsule sampling in one native call."""
+        return np.asarray(
+            self._native.first_bimanual_collision(
+                initial,
+                desired,
+                torso_start,
+                torso_end,
+                radii,
+                point_radii,
+                pairs,
+                activation_distance,
+                interpolation_limit,
             )
         )
 
@@ -201,7 +240,7 @@ class CppCollisionBackend:
             torso_start,
             torso_end,
             radii,
-            np.asarray(pairs, dtype=np.int32),
+            pairs,
             minimum_distance,
             activation_distance,
             release_distance,

@@ -21,13 +21,19 @@ from sew_mimic.robots import (
     DEFAULT_OPENARM_URDF,
     MarvinSafetyFilter,
     OpenArmSafetyFilter,
+    RobotSafetyFilter,
+    SerialArmSpec,
+    URDFBimanualPoseEvaluator,
     URDFKinematics,
     available_robots,
     estimate_marvin_capsule_config,
     load_marvin_arm,
     load_openarm_arm,
     load_robot_arm,
+    load_serial_7dof_arm,
     marvin_bimanual_pose,
+    urdf_bimanual_pose,
+    validate_robot_adapter,
 )
 
 
@@ -108,7 +114,11 @@ def test_marvin_position_fk_and_oobb_capsules():
     right = load_marvin_arm(side="right")
     kinematics = URDFKinematics(DEFAULT_MARVIN_URDF)
     pose = marvin_bimanual_pose(kinematics, left, right, np.zeros(7), np.zeros(7))
+    generic_pose = urdf_bimanual_pose(kinematics, left, right, np.zeros(7), np.zeros(7))
     points = pose.points()
+    assert generic_pose.points() == pytest.approx(points)
+    evaluator = URDFBimanualPoseEvaluator(kinematics, left, right)
+    assert evaluator.evaluate(np.zeros(7), np.zeros(7)).points() == pytest.approx(points)
     assert points.shape == (8, 3)
     assert np.all(np.isfinite(points))
     assert np.all(
@@ -120,6 +130,9 @@ def test_marvin_position_fk_and_oobb_capsules():
     assert 0.04 < config.radii.lower_arm < 0.12
     assert 0.04 < config.radii.hand < 0.12
     assert 0.05 < config.radii.torso < 0.20
+
+    with pytest.raises(ValueError, match="matching side labels"):
+        urdf_bimanual_pose(kinematics, right, left, np.zeros(7), np.zeros(7))
 
 
 @pytest.mark.skipif(not Path(DEFAULT_MARVIN_URDF).is_file(), reason="Marvin asset is not installed")
@@ -207,6 +220,50 @@ def test_unified_robot_registry_loads_bundled_adapters():
     assert marvin.side == "left"
     assert openarm.side == "right"
     assert len(marvin.joint_names) == len(openarm.joint_names) == 7
+
+
+@pytest.mark.parametrize("name", ["marvin", "openarm"])
+def test_bundled_robot_adapters_pass_generic_validation(name):
+    report = validate_robot_adapter(name)
+    assert report.name == name
+    assert report.keypoints_finite
+    assert report.minimum_joint_range > 0.0
+    assert report.maximum_consecutive_axis_dot < 1e-4
+
+
+def test_generic_arm_loader_rejects_invalid_contracts():
+    arm = load_marvin_arm(side="left")
+    with pytest.raises(ValueError, match="seven unique joints"):
+        load_serial_7dof_arm(DEFAULT_MARVIN_URDF, arm.joint_names[:-1], arm.ee_link)
+    with pytest.raises(ValueError, match="No fixed tool chain"):
+        load_serial_7dof_arm(DEFAULT_MARVIN_URDF, arm.joint_names, "missing_tool_link")
+
+
+def test_declarative_arm_spec_loads_both_sides():
+    left = load_marvin_arm(side="left")
+    right = load_marvin_arm(side="right")
+    spec = SerialArmSpec(
+        left_joint_names=left.joint_names,
+        right_joint_names=right.joint_names,
+        left_ee_link=left.ee_link,
+        right_ee_link=right.ee_link,
+    )
+    assert spec.load(DEFAULT_MARVIN_URDF, "left").joint_names == left.joint_names
+    assert spec.load(DEFAULT_MARVIN_URDF, "right").joint_names == right.joint_names
+
+
+def test_declarative_arm_spec_validates_contract():
+    names = tuple(f"joint_{index}" for index in range(7))
+    with pytest.raises(ValueError, match="seven unique joints"):
+        SerialArmSpec(names[:-1], names, "left_tool", "right_tool")
+    spec = SerialArmSpec(names, names, "left_tool", "right_tool")
+    with pytest.raises(ValueError, match="side must"):
+        spec.load(DEFAULT_MARVIN_URDF, "centre")
+
+
+def test_bundled_safety_filters_share_generic_orchestration():
+    assert issubclass(MarvinSafetyFilter, RobotSafetyFilter)
+    assert issubclass(OpenArmSafetyFilter, RobotSafetyFilter)
 
 
 @pytest.mark.skipif(

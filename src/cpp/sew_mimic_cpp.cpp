@@ -277,7 +277,8 @@ class CapsuleCollisionDetector {
   }
 
   /// Evaluate only configured non-adjacent/self-collision pairs.
-  double minimumDistance(const std::vector<Capsule>& capsules,
+  template <typename Capsules>
+  double minimumDistance(const Capsules& capsules,
                          const std::vector<std::pair<int, int>>& pairs) const {
     if (pairs.empty()) throw std::runtime_error("Collision-pair list must not be empty");
     double minimum = std::numeric_limits<double>::infinity();
@@ -383,8 +384,7 @@ class XpbdCollisionProjector {
 
   double minimumDistance(const std::array<Vec, 8>& points) const {
     auto current = capsules(points);
-    std::vector<CapsuleCollisionDetector::Capsule> vector(current.begin(), current.end());
-    return detector_.minimumDistance(vector, pairs_);
+    return detector_.minimumDistance(current, pairs_);
   }
 
   /// Apply one persistent-multiplier inequality-constraint pass.
@@ -578,6 +578,129 @@ double minimum_capsule_distance(const DoubleArray& starts, const DoubleArray& en
   return distance;
 }
 
+double minimum_bimanual_capsule_distance(const DoubleArray& points, const DoubleArray& torso_start,
+                                         const DoubleArray& torso_end, const DoubleArray& radii,
+                                         const IntArray& pairs) {
+  const auto point_info = points.request(), pair_info = pairs.request();
+  if (point_info.ndim != 2 || point_info.shape[0] != 8 || point_info.shape[1] != 3 ||
+      pair_info.ndim != 2 || pair_info.shape[1] != 2)
+    throw py::value_error("Bimanual points must be (8,3) and pairs must be (N,2)");
+  const auto flat_points = vector_array<24>(points, "points");
+  const auto torso_first = vector_array<3>(torso_start, "torso_start");
+  const auto torso_second = vector_array<3>(torso_end, "torso_end");
+  const auto radius_values = vector_array<7>(radii, "radii");
+  for (const double radius : radius_values)
+    if (!std::isfinite(radius) || radius <= 0.0)
+      throw py::value_error("Capsule radii must be finite and positive");
+  std::array<CapsuleCollisionDetector::Capsule, 7> capsules{};
+  capsules[0] = {torso_first, torso_second, radius_values[0]};
+  constexpr std::array<std::pair<int, int>, 6> links = {std::pair{0, 1}, {1, 2}, {2, 3},
+                                                        {4, 5},          {5, 6}, {6, 7}};
+  for (size_t i = 0; i < links.size(); ++i) {
+    const auto [start, end] = links[i];
+    std::copy(flat_points.begin() + 3 * start, flat_points.begin() + 3 * start + 3,
+              capsules[i + 1].start.begin());
+    std::copy(flat_points.begin() + 3 * end, flat_points.begin() + 3 * end + 3,
+              capsules[i + 1].end.begin());
+    capsules[i + 1].radius = radius_values[i + 1];
+  }
+  const auto* pair_data = static_cast<const int*>(pair_info.ptr);
+  if (pair_info.shape[0] == 0) throw py::value_error("Collision pairs must not be empty");
+  for (py::ssize_t i = 0; i < pair_info.shape[0]; ++i) {
+    const int first = pair_data[2 * i], second = pair_data[2 * i + 1];
+    if (first < 0 || second < 0 || first >= 7 || second >= 7)
+      throw py::value_error("Collision-pair index is out of range");
+  }
+  double distance = std::numeric_limits<double>::infinity();
+  {
+    py::gil_scoped_release release;
+    for (py::ssize_t i = 0; i < pair_info.shape[0]; ++i) {
+      const int first = pair_data[2 * i], second = pair_data[2 * i + 1];
+      distance = std::min(
+          distance, CapsuleCollisionDetector::signedDistance(capsules[first], capsules[second]));
+    }
+  }
+  return distance;
+}
+
+py::array_t<double> first_bimanual_collision(const DoubleArray& initial, const DoubleArray& desired,
+                                             const DoubleArray& torso_start,
+                                             const DoubleArray& torso_end, const DoubleArray& radii,
+                                             const DoubleArray& point_radii, const IntArray& pairs,
+                                             double activation_distance, int interpolation_limit) {
+  const auto initial_info = initial.request(), desired_info = desired.request();
+  const auto pair_info = pairs.request();
+  if (initial_info.ndim != 2 || initial_info.shape[0] != 8 || initial_info.shape[1] != 3 ||
+      desired_info.ndim != 2 || desired_info.shape[0] != 8 || desired_info.shape[1] != 3 ||
+      pair_info.ndim != 2 || pair_info.shape[1] != 2)
+    throw py::value_error("Collision interpolation expects two (8,3) poses and (N,2) pairs");
+  if (pair_info.shape[0] == 0 || interpolation_limit <= 0)
+    throw py::value_error("Collision pairs and interpolation limit must be non-empty/positive");
+  const auto initial_values = vector_array<24>(initial, "initial");
+  const auto desired_values = vector_array<24>(desired, "desired");
+  const auto torso_first = vector_array<3>(torso_start, "torso_start");
+  const auto torso_second = vector_array<3>(torso_end, "torso_end");
+  const auto radius_values = vector_array<7>(radii, "radii");
+  const auto interpolation_radii = vector_array<8>(point_radii, "point_radii");
+  if (!std::isfinite(activation_distance))
+    throw py::value_error("Activation distance must be finite");
+  for (const double radius : radius_values)
+    if (!std::isfinite(radius) || radius <= 0.0)
+      throw py::value_error("Capsule radii must be finite and positive");
+  const auto* pair_data = static_cast<const int*>(pair_info.ptr);
+  for (py::ssize_t i = 0; i < pair_info.shape[0]; ++i) {
+    const int first = pair_data[2 * i], second = pair_data[2 * i + 1];
+    if (first < 0 || second < 0 || first >= 7 || second >= 7)
+      throw py::value_error("Collision-pair index is out of range");
+  }
+  int samples = 1;
+  std::array<double, 24> displacement{};
+  for (int point = 0; point < 8; ++point) {
+    if (!std::isfinite(interpolation_radii[point]) || interpolation_radii[point] <= 0.0)
+      throw py::value_error("Interpolation radii must be finite and positive");
+    double squared_distance = 0.0;
+    for (int axis = 0; axis < 3; ++axis) {
+      const int offset = 3 * point + axis;
+      if (!std::isfinite(initial_values[offset]) || !std::isfinite(desired_values[offset]))
+        throw py::value_error("Collision interpolation poses must be finite");
+      displacement[offset] = desired_values[offset] - initial_values[offset];
+      squared_distance += displacement[offset] * displacement[offset];
+    }
+    samples = std::max(samples, static_cast<int>(std::ceil(std::sqrt(squared_distance) /
+                                                           interpolation_radii[point])));
+  }
+  samples = std::min(samples, interpolation_limit);
+  std::array<Vec, 8> candidate{};
+  {
+    py::gil_scoped_release release;
+    for (int sample = 1; sample <= samples; ++sample) {
+      const double fraction = static_cast<double>(sample) / samples;
+      for (int point = 0; point < 8; ++point)
+        for (int axis = 0; axis < 3; ++axis) {
+          const int offset = 3 * point + axis;
+          candidate[point][axis] = initial_values[offset] + fraction * displacement[offset];
+        }
+      std::array<CapsuleCollisionDetector::Capsule, 7> capsules{};
+      capsules[0] = {torso_first, torso_second, radius_values[0]};
+      constexpr std::array<std::pair<int, int>, 6> links = {std::pair{0, 1}, {1, 2}, {2, 3},
+                                                            {4, 5},          {5, 6}, {6, 7}};
+      for (size_t i = 0; i < links.size(); ++i)
+        capsules[i + 1] = {candidate[links[i].first], candidate[links[i].second],
+                           radius_values[i + 1]};
+      double distance = std::numeric_limits<double>::infinity();
+      for (py::ssize_t i = 0; i < pair_info.shape[0]; ++i)
+        distance =
+            std::min(distance, CapsuleCollisionDetector::signedDistance(
+                                   capsules[pair_data[2 * i]], capsules[pair_data[2 * i + 1]]));
+      if (distance < activation_distance) break;
+    }
+  }
+  py::array_t<double> output({py::ssize_t{8}, py::ssize_t{3}});
+  for (int point = 0; point < 8; ++point)
+    std::copy(candidate[point].begin(), candidate[point].end(), output.mutable_data() + 3 * point);
+  return output;
+}
+
 py::tuple project_xpbd(const DoubleArray& points, const DoubleArray& torso_start,
                        const DoubleArray& torso_end, const DoubleArray& radii,
                        const IntArray& pairs, double minimum_distance, double activation_distance,
@@ -595,6 +718,7 @@ py::tuple project_xpbd(const DoubleArray& points, const DoubleArray& torso_start
   auto radius_values = vector_array<4>(radii, "radii");
   const auto* pair_data = static_cast<const int*>(pair_info.ptr);
   std::vector<std::pair<int, int>> collision_pairs;
+  collision_pairs.reserve(pair_info.shape[0]);
   for (py::ssize_t i = 0; i < pair_info.shape[0]; ++i)
     collision_pairs.emplace_back(pair_data[2 * i], pair_data[2 * i + 1]);
   XpbdCollisionProjector::Settings settings{minimum_distance, activation_distance, release_distance,
@@ -640,6 +764,14 @@ PYBIND11_MODULE(_sew_mimic_cpp, m) {
   m.def("minimum_capsule_distance", &minimum_capsule_distance, py::arg("starts"), py::arg("ends"),
         py::arg("radii"), py::arg("pairs"),
         "Return minimum signed capsule distance in metres for configured pairs.");
+  m.def("minimum_bimanual_capsule_distance", &minimum_bimanual_capsule_distance, py::arg("points"),
+        py::arg("torso_start"), py::arg("torso_end"), py::arg("radii"), py::arg("pairs"),
+        "Return bimanual minimum distance without Python-side capsule assembly.");
+  m.def("first_bimanual_collision", &first_bimanual_collision, py::arg("initial"),
+        py::arg("desired"), py::arg("torso_start"), py::arg("torso_end"), py::arg("radii"),
+        py::arg("point_radii"), py::arg("pairs"), py::arg("activation_distance"),
+        py::arg("interpolation_limit"),
+        "Return the first interpolated pose entering collision activation distance.");
   m.def("project_xpbd", &project_xpbd, py::arg("points"), py::arg("torso_start"),
         py::arg("torso_end"), py::arg("radii"), py::arg("pairs"), py::arg("minimum_distance"),
         py::arg("activation_distance"), py::arg("release_distance"), py::arg("compliance"),

@@ -16,6 +16,7 @@ from ..utility import skew, unit
 logger = logging.getLogger(__name__)
 _IDENTITY_3 = np.eye(3)
 _IDENTITY_3.flags.writeable = False
+JointRecord = tuple[str, str, str, str, np.ndarray, np.ndarray]
 
 
 def rpy_rotation(rpy: np.ndarray) -> np.ndarray:
@@ -53,7 +54,7 @@ class URDFKinematics:
         self.path = Path(urdf_path).expanduser().resolve()
         root = ET.parse(self.path).getroot()
         links = {str(link.get("name")) for link in root.findall("link")}
-        self.joints: list[tuple[str, str, str, str, np.ndarray, np.ndarray]] = []
+        self.joints: list[JointRecord] = []
         child_links = set()
         for joint in root.findall("joint"):
             parent = joint.find("parent")
@@ -130,6 +131,12 @@ class URDFKinematics:
                 link = joint[2]
         return frozenset(names)
 
+    @lru_cache(maxsize=32)
+    def _joint_plan(self, required_links: frozenset[str]) -> tuple[JointRecord, ...]:
+        """Compile the ordered FK operations needed for a set of target links."""
+        required_names = self._required_joint_names(required_links)
+        return tuple(joint for joint in self.joints if joint[0] in required_names)
+
     def link_transforms(
         self,
         joint_positions: dict[str, float],
@@ -142,15 +149,11 @@ class URDFKinematics:
         sensor, and other fixed branches in high-rate control loops.
         """
         logger.debug("URDF FK started: commanded_joints=%d", len(joint_positions))
-        required_joints = (
-            None
-            if required_links is None
-            else self._required_joint_names(frozenset(required_links))
+        joint_plan = (
+            self.joints if required_links is None else self._joint_plan(frozenset(required_links))
         )
         transforms = {self.root_link: np.eye(4)}
-        for name, joint_type, parent, child, origin, axis in self.joints:
-            if required_joints is not None and name not in required_joints:
-                continue
+        for name, joint_type, parent, child, origin, axis in joint_plan:
             if joint_type in ("revolute", "continuous"):
                 theta = float(joint_positions.get(name, 0.0))
                 axis_skew, axis_skew_squared = self._rotation_terms[name]
