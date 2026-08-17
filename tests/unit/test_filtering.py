@@ -101,6 +101,14 @@ def test_rotation_filter_smooths_on_so3_and_adapts_to_motion():
     assert 0.0 < fixed_angle < adaptive_angle < np.pi / 2.0
 
 
+def test_rotation_filter_stays_on_so3_over_long_motion_sequence():
+    filter_ = OneEuroRotationFilter(validate_input=False)
+    for index in range(2000):
+        axis = np.array([1.0, 0.5 + 0.1 * np.sin(index), -0.25])
+        result = filter_.update(index / 120.0, rot(axis, 0.8 * np.sin(index / 31.0)))
+        assert is_rotation_matrix(result, tol=1e-6)
+
+
 def test_rotation_filter_validates_input_time_and_reset():
     filter_ = OneEuroRotationFilter()
     filter_.update(1.0, np.eye(3))

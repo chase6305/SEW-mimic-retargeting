@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -20,6 +21,11 @@ def _positive_finite(name: str, value: float | np.ndarray) -> np.ndarray:
 def _smoothing_factor(cutoff: float | np.ndarray, dt: float) -> np.ndarray:
     """Return exact first-order low-pass gain for cutoff in hertz."""
     return 1.0 - np.exp(-2.0 * np.pi * np.asarray(cutoff) * dt)
+
+
+def _scalar_smoothing_factor(cutoff: float, dt: float) -> float:
+    """Scalar specialization avoiding NumPy dispatch in SO(3) hot loops."""
+    return 1.0 - math.exp(-2.0 * math.pi * cutoff * dt)
 
 
 @dataclass
@@ -148,12 +154,12 @@ def _rotation_quaternion(rotation: np.ndarray) -> np.ndarray:
         quaternion[index + 1] = 0.25 * scale
         quaternion[first + 1] = (matrix[first, index] + matrix[index, first]) / scale
         quaternion[second + 1] = (matrix[second, index] + matrix[index, second]) / scale
-    return quaternion / np.linalg.norm(quaternion)
+    return quaternion / math.sqrt(float(quaternion @ quaternion))
 
 
 def _quaternion_rotation(quaternion: np.ndarray) -> np.ndarray:
     """Convert a scalar-first unit quaternion to SO(3)."""
-    w, x, y, z = quaternion / np.linalg.norm(quaternion)
+    w, x, y, z = quaternion
     return np.array(
         [
             [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)],
@@ -172,10 +178,10 @@ def _slerp(first: np.ndarray, second: np.ndarray, fraction: float) -> np.ndarray
     dot = float(np.clip(dot, -1.0, 1.0))
     if dot > 0.9995:
         interpolated = first + fraction * (second - first)
-        return interpolated / np.linalg.norm(interpolated)
-    angle = float(np.arccos(dot))
-    sine = np.sin(angle)
-    return (np.sin((1.0 - fraction) * angle) * first + np.sin(fraction * angle) * second) / sine
+        return interpolated / math.sqrt(float(interpolated @ interpolated))
+    angle = math.acos(dot)
+    sine = math.sin(angle)
+    return (math.sin((1.0 - fraction) * angle) * first + math.sin(fraction * angle) * second) / sine
 
 
 @dataclass
@@ -222,12 +228,12 @@ class OneEuroRotationFilter:
         dt = float(timestamp - self._timestamp)
         if dt <= 0.0:
             raise ValueError("timestamps must increase strictly")
-        relative_dot = float(np.clip(abs(self._raw_quaternion @ quaternion), 0.0, 1.0))
-        raw_speed = 2.0 * np.arccos(relative_dot) / dt
-        derivative_alpha = float(_smoothing_factor(self.derivative_cutoff, dt))
+        relative_dot = min(abs(float(self._raw_quaternion @ quaternion)), 1.0)
+        raw_speed = 2.0 * math.acos(relative_dot) / dt
+        derivative_alpha = _scalar_smoothing_factor(self.derivative_cutoff, dt)
         self._angular_velocity += derivative_alpha * (raw_speed - self._angular_velocity)
         cutoff = self.min_cutoff + self.beta * self._angular_velocity
-        fraction = float(_smoothing_factor(cutoff, dt))
+        fraction = _scalar_smoothing_factor(cutoff, dt)
         self._quaternion = _slerp(self._quaternion, quaternion, fraction)
         self._raw_quaternion = quaternion.copy()
         self._timestamp = float(timestamp)
