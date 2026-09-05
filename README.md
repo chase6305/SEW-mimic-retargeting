@@ -67,7 +67,7 @@ C++ development, including the pinned formatter:
 
 ```bash
 pip install -e '.[dev,cpp,cpp-dev]'
-clang-format -i src/cpp/sew_mimic_cpp.cpp
+clang-format -i src/cpp/*.cpp src/cpp/*.h
 ```
 
 ### Python/C++ backend selection
@@ -584,15 +584,35 @@ its orientation outputs remain valid SO(3) matrices. `OneEuroFilter` is also
 available independently for scalar or Euclidean observations.
 
 ```python
-from sew_mimic import BimanualPoseFilter, JointRateLimiter
+from sew_mimic import BimanualPoseFilter, JointRateLimiter, OneEuroConfig
 
-tracking_filter = BimanualPoseFilter(min_cutoff=1.0, beta=0.02)
+tracking_filter = BimanualPoseFilter(
+    min_cutoff=1.0,
+    beta=0.02,
+    rotation_config=OneEuroConfig(min_cutoff=1.5, beta=0.02),
+)
 filtered_pose = tracking_filter.update(timestamp, measured_bimanual_pose)
 
 command_filter = JointRateLimiter(max_velocity=robot_velocity_limits)
 command_filter.reset(current_joint_command, timestamp)
 limited_command = command_filter.update(next_timestamp, desired_joint_command)
 ```
+
+Position and angular speed have different units; `rotation_config` allows
+separate tuning. Omitting it retains the shared-parameter behaviour. For VR
+virtual tool markers, set `tool_length` to filter six SEW points and reconstruct
+each marker from its filtered wrist and orientation. `TrackingPoseStream` does
+this automatically with the calibration's tool length. Generic FK poses keep
+independent filtering of all eight keypoints by default.
+
+Compare noise reduction and step response on repeatable synthetic input:
+
+```bash
+python -m examples.demo_tracking_filtering --rate 90
+```
+
+These are illustrative filter settings; tune on recorded device input. Failed
+numerical updates leave all position and rotation histories unchanged.
 
 Keep rotation validation enabled for external tracking data. If the pose comes
 directly from a validated FK implementation, use
@@ -605,6 +625,71 @@ self-collision filtering, and joint-rate limiting. If rate limiting materially
 changes a collision-corrected command, perform a final collision check before
 sending it to hardware. Call `reset()` after tracking loss, emergency stop, or
 controller reconnection; timestamps must be finite and strictly increasing.
+
+## VR and tracking-device inputs
+
+`sew_mimic.tracking` provides device-neutral tracking snapshots, an OpenXR joint
+decoder, a latest-frame buffer, freshness checks and explicit robot/tool
+calibration. Meta's body-joint name mapping is included; other SDKs can map
+their joints into the same contract without changing robot adapters.
+
+`TrackingPoseStream` combines ordering, input checks, calibration and smoothing
+for live adapters and replay. It preserves loss notifications between control
+ticks, retains packet ordering across recalibration, and waits for newer
+observations after a reset. Unchanged poses still receive freshness checks
+without repeated coordinate transforms or filtering.
+Invalid mapped sample times trigger a hold without advancing sample ordering
+or the recovery boundary, so later correctly timed data can recover.
+
+Optional `TrackingMotionLimits` checks the speed of all six SEW joints and both
+wrist rotations before adaptive smoothing. Rejected spikes never become the
+next comparison reference. Configure limits from device recordings; after the
+reference's `max_sample_gap` expires, explicitly reapply calibration to establish
+a fresh reference. Input speed checks are separate from robot command limits.
+
+`TrackingStreamConfig` captures the input policy, position/rotation smoothing,
+motion checks and tracked-joint requirement in one immutable snapshot. Use
+`TrackingPoseStream.from_config(calibration, config)` for reusable settings, or
+save an existing stream's `config.to_metadata()`. The example records the full
+configuration and restores it during replay; `--config settings.json` explicitly
+loads another snapshot. Older recordings remain readable.
+
+Offline `fit_rigid_transform()` and `fit_hand_tool_rotation()` estimate the
+tracking-to-robot transform and per-hand tool offsets from paired observations.
+They report position/angular residuals and provide explicit accuracy checks;
+degenerate reference geometry is rejected. Try the synthetic calibration example:
+
+```bash
+python -m examples.demo_tracking_calibration
+```
+
+The [VR integration guide](docs/vr-integration.md) describes device capabilities,
+coordinate conventions, clock synchronization, recentering and the application
+control boundary. Headset/controller poses alone do not determine the shoulder
+and elbow data required by SEW. SDK clients and physical hardware integration
+are not included.
+
+Run the synthetic input-to-retargeting pipeline without a headset:
+
+```bash
+python -m examples.demo_tracking_input --robot marvin
+```
+
+Record and replay the same input and control timing:
+
+```bash
+python -m examples.demo_tracking_input --robot marvin --record /tmp/tracking-demo.jsonl
+python -m examples.demo_tracking_input --replay /tmp/tracking-demo.jsonl
+```
+
+`TrackingRecorder` and `TrackingRecordingReader` stream canonical frames,
+calibration changes and control ticks. Original timestamps preserve timeout
+behaviour during offline replay. The example checks tracking loss and a packet
+gap, and prints a digest for comparing complete simulated command sequences.
+
+Use `RobotSafetyFilter.retarget(pose, q_left_current, q_right_current)` to solve
+a calibrated world-frame pose and apply the existing robot collision filter.
+The application owns engagement, command limiting and hardware output.
 
 ## Demos
 
@@ -770,6 +855,11 @@ Adjacent same-arm capsules and torso-to-upper-arm attachment pairs are excluded
 from the default collision-pair set.
 
 ## Performance metrics
+
+See the [2026-09-05 optimization measurements](docs/performance-2026-09-05.md)
+for before/after solver, batch, relative-FK, and complete safety timings.
+The [architecture guide](docs/architecture.md) describes shared FK preparation,
+backend execution, model ownership, and compatibility with existing APIs.
 
 ### Metric definitions
 

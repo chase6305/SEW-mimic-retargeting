@@ -9,6 +9,7 @@ from sew_mimic import (
     backend_status,
     cpp_backend_available,
     get_backend,
+    rot,
     solve,
     solve_batch,
 )
@@ -210,3 +211,56 @@ def test_native_solver_is_safe_for_parallel_arm_workers():
 def test_invalid_backend_name_is_rejected():
     with pytest.raises(ValueError, match="python, cpp"):
         get_backend("cuda")
+
+
+@pytest.mark.parametrize("backend", ["python", "cpp"])
+@pytest.mark.parametrize("direct", [False, True])
+@pytest.mark.parametrize("invalid", ["scalar", "shape", "nonfinite", "empty_q0"])
+def test_batch_validation_is_consistent_for_all_entry_points(backend, direct, invalid):
+    if backend == "cpp" and not cpp_backend_available():
+        pytest.skip("native extension is not built")
+    q0 = np.zeros(7)
+    shoulders = np.empty((0, 3))
+    if invalid == "scalar":
+        shoulders = 0.0
+    elif invalid == "shape":
+        shoulders = np.empty((0, 4))
+    elif invalid == "nonfinite":
+        q0[0] = np.nan
+    else:
+        q0 = np.zeros(6)
+    args = (make_robot(), q0, shoulders, np.empty((0, 3)), np.empty((0, 3)), np.empty((0, 3, 3)))
+    with pytest.raises(ValueError, match="shape|finite"):
+        if direct:
+            get_backend(backend).solve_batch(*args)
+        else:
+            solve_batch(*args, backend=backend)
+
+
+@pytest.mark.parametrize("backend", ["python", "cpp"])
+def test_solver_is_invariant_to_local_joint_frame_conventions(backend):
+    if backend == "cpp" and not cpp_backend_available():
+        pytest.skip("native extension is not built")
+    rng = np.random.default_rng(302)
+    reference = make_robot()
+    frames = [np.eye(3)] + [rot(rng.normal(size=3), rng.uniform(-3, 3)) for _ in range(7)]
+    calibrated = Serial7DoF(
+        axes_local=np.array(
+            [frames[i + 1].T @ axis for i, axis in enumerate(reference.axes_local)]
+        ),
+        R_local=np.array([frames[i].T @ frames[i + 1] for i in range(7)]),
+        q_min=reference.q_min,
+        q_max=reference.q_max,
+        R_7T_local=frames[7].T,
+    )
+    for _ in range(30):
+        target = rng.uniform(-1.0, 1.0, size=7)
+        current = rng.uniform(-1.0, 1.0, size=7)
+        shoulder = np.zeros(3)
+        elbow = 0.3 * reference.axis_world(target, 3)
+        wrist = elbow + 0.25 * reference.axis_world(target, 5)
+        hand = reference.tool_orientation(target)
+        result = solve(calibrated, current, shoulder, elbow, wrist, hand, backend=backend)
+        expected = solve(reference, current, shoulder, elbow, wrist, hand, backend="python")
+        np.testing.assert_allclose(result, expected, atol=1e-9)
+        np.testing.assert_allclose(calibrated.tool_orientation(result), hand, atol=1e-9)

@@ -8,6 +8,7 @@ from sew_mimic import (
     cpp_backend_available,
     minimum_capsule_distance,
 )
+from sew_mimic.backends import get_cpp_collision_backend
 from sew_mimic.collision import _capsule_distances_unchecked
 from sew_mimic.safety import CapsuleRadii, SafetyFilterConfig
 
@@ -57,6 +58,37 @@ def test_vectorized_capsule_distances_match_scalar_kernel():
         ]
     )
     assert np.allclose(batched, scalar, atol=1e-12)
+
+
+@pytest.mark.parametrize(
+    "a0,a1,b0,b1,distance",
+    [
+        ([0, 0, 0], [0, 0, 0], [0, 2, 0], [0, 2, 0], 2.0),
+        ([2, 0, 0], [2, 0, 0], [0, 0, 0], [1, 0, 0], 1.0),
+        ([0, 0, 0], [1, 0, 0], [-1, 1, 0], [-1, 1, 0], np.sqrt(2)),
+        ([0, 0, 0], [1, 0, 0], [2, -1, 0], [2, 1, 0], 1.0),
+        ([0, 0, 0], [1, 0, 0], [0, 1, 0], [1, 1, 0], 1.0),
+        ([-1, 0, 0], [1, 0, 0], [0, -1, 0], [0, 1, 0], 0.0),
+    ],
+)
+def test_capsule_kernels_agree_on_degenerate_parallel_and_endpoint_contacts(
+    a0, a1, b0, b1, distance
+):
+    first, second = Capsule(a0, a1, 0.1), Capsule(b0, b1, 0.2)
+    contact = capsule_contact(first, second)
+    assert contact.distance == pytest.approx(distance - 0.3)
+    assert np.linalg.norm(contact.normal) == pytest.approx(1.0)
+    starts = np.array([a0, b0], dtype=float)
+    ends = np.array([a1, b1], dtype=float)
+    vectorized = _capsule_distances_unchecked(
+        starts[:1], ends[:1], starts[1:], ends[1:], np.array([0.1]), np.array([0.2])
+    )
+    assert vectorized[0] == pytest.approx(contact.distance)
+    if cpp_backend_available():
+        native = get_cpp_collision_backend().minimum_distance(
+            starts, ends, np.array([0.1, 0.2]), np.array([[0, 1]], dtype=np.int32)
+        )
+        assert native == pytest.approx(contact.distance)
 
 
 @pytest.mark.skipif(not cpp_backend_available(), reason="native extension is not built")

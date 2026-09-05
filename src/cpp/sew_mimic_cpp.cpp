@@ -11,71 +11,12 @@
 #include <tuple>
 #include <vector>
 
-namespace py = pybind11;
-constexpr double kEps = 1e-10;
-constexpr double kTwoPi = 2.0 * M_PI;
+#include "kinematics.h"
+#include "math_utils.h"
 
-using Vec = std::array<double, 3>;
-using Mat = std::array<double, 9>;
-using Joints = std::array<double, 7>;
+namespace py = pybind11;
 using DoubleArray = py::array_t<double, py::array::c_style | py::array::forcecast>;
 using IntArray = py::array_t<int, py::array::c_style | py::array::forcecast>;
-
-Vec add(Vec a, Vec b) { return {a[0] + b[0], a[1] + b[1], a[2] + b[2]}; }
-Vec sub(Vec a, Vec b) { return {a[0] - b[0], a[1] - b[1], a[2] - b[2]}; }
-Vec scale(Vec a, double s) { return {a[0] * s, a[1] * s, a[2] * s}; }
-double dot(Vec a, Vec b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
-Vec cross(Vec a, Vec b) {
-  return {a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]};
-}
-double norm(Vec a) { return std::sqrt(dot(a, a)); }
-bool finite(Vec value) {
-  return std::all_of(value.begin(), value.end(), [](double item) { return std::isfinite(item); });
-}
-bool finite(Mat value) {
-  return std::all_of(value.begin(), value.end(), [](double item) { return std::isfinite(item); });
-}
-Vec unit(Vec a) {
-  const double n = norm(a);
-  if (n < kEps) throw std::runtime_error("Cannot normalize a near-zero vector");
-  return scale(a, 1.0 / n);
-}
-Mat eye() { return {1, 0, 0, 0, 1, 0, 0, 0, 1}; }
-Mat transpose(Mat a) { return {a[0], a[3], a[6], a[1], a[4], a[7], a[2], a[5], a[8]}; }
-Vec mul(Mat a, Vec v) {
-  return {a[0] * v[0] + a[1] * v[1] + a[2] * v[2], a[3] * v[0] + a[4] * v[1] + a[5] * v[2],
-          a[6] * v[0] + a[7] * v[1] + a[8] * v[2]};
-}
-Mat mul(Mat a, Mat b) {
-  Mat c{};
-  for (int i = 0; i < 3; ++i)
-    for (int j = 0; j < 3; ++j)
-      for (int k = 0; k < 3; ++k) c[3 * i + j] += a[3 * i + k] * b[3 * k + j];
-  return c;
-}
-Mat rot(Vec axis, double theta) {
-  axis = unit(axis);
-  const double c = std::cos(theta), s = std::sin(theta), d = 1.0 - c;
-  const double x = axis[0], y = axis[1], z = axis[2];
-  return {c + x * x * d,     x * y * d - z * s, x * z * d + y * s, y * x * d + z * s, c + y * y * d,
-          y * z * d - x * s, z * x * d - y * s, z * y * d + x * s, c + z * z * d};
-}
-
-double determinant(Mat matrix) {
-  return matrix[0] * (matrix[4] * matrix[8] - matrix[5] * matrix[7]) -
-         matrix[1] * (matrix[3] * matrix[8] - matrix[5] * matrix[6]) +
-         matrix[2] * (matrix[3] * matrix[7] - matrix[4] * matrix[6]);
-}
-
-bool rotation_matrix(Mat matrix, double tolerance = 1e-7) {
-  if (!finite(matrix) || std::abs(determinant(matrix) - 1.0) > tolerance) return false;
-  const Mat product = mul(transpose(matrix), matrix);
-  const Mat identity = eye();
-  double error_squared = 0.0;
-  for (size_t i = 0; i < product.size(); ++i)
-    error_squared += (product[i] - identity[i]) * (product[i] - identity[i]);
-  return std::sqrt(error_squared) <= tolerance;
-}
 
 /** Calibrated orientation-only model shared by every native solve.
  *
@@ -96,8 +37,6 @@ class RobotModel {
     for (int j = 0; j < frame; ++j) r = mul(r, mul(local[j], rot(axes[j], q[j])));
     return r;
   }
-  /// Return frame-a<-frame-b rotation.
-  Mat between(const Joints& q, int a, int b) const { return mul(transpose(r0(q, a)), r0(q, b)); }
 };
 
 std::pair<double, bool> sp1(Vec p1, Vec p2, Vec k) {
@@ -199,12 +138,11 @@ class SewMimicSolver {
   std::pair<double, double> alignAxis(int i, const Joints& q0, Vec target) const {
     target = unit(target);
     const int ia = i - 3, ib = i - 2, frame = i - 2;
-    Joints base = q0;
-    base[ia] = 0.0;
-    base[ib] = 0.0;
-    const Vec vf = mul(transpose(robot_.r0(base, frame)), target);
-    const Vec hi = mul(robot_.between(base, frame, i), robot_.axes[i - 1]);
-    const Vec hp = mul(robot_.between(base, frame, i - 1), robot_.axes[i - 2]);
+    const Vec vf = mul(transpose(mul(robot_.r0(q0, ia), robot_.local[ia])), target);
+    // q_(i-1) is zero and joint i cannot rotate its own axis. The shared
+    // base-to-frame chain cancels, leaving only fixed local transforms.
+    const Vec hi = mul(robot_.local[frame], mul(robot_.local[frame + 1], robot_.axes[i - 1]));
+    const Vec hp = mul(robot_.local[frame], robot_.axes[i - 2]);
     auto [raw, unused] = sp2(vf, hi, scale(robot_.axes[i - 3], -1.0), hp);
     (void)unused;
     bool found = false;
@@ -254,7 +192,8 @@ class CapsuleCollisionDetector {
   };
 
   static double signedDistance(const Capsule& first, const Capsule& second) {
-    return contact(first, second).distance;
+    const auto closest = closestPoints(first.start, first.end, second.start, second.end);
+    return norm(sub(closest.point_b, closest.point_a)) - first.radius - second.radius;
   }
 
   /// Return distance, A-to-B normal, and closest segment interpolation parameters.
@@ -666,8 +605,11 @@ py::array_t<double> first_bimanual_collision(const DoubleArray& initial, const D
       displacement[offset] = desired_values[offset] - initial_values[offset];
       squared_distance += displacement[offset] * displacement[offset];
     }
-    samples = std::max(samples, static_cast<int>(std::ceil(std::sqrt(squared_distance) /
-                                                           interpolation_radii[point])));
+    // Clamp before converting to int: large displacements can exceed its range.
+    const double count =
+        std::min(static_cast<double>(interpolation_limit),
+                 std::ceil(std::sqrt(squared_distance) / interpolation_radii[point]));
+    samples = std::max(samples, static_cast<int>(count));
   }
   samples = std::min(samples, interpolation_limit);
   std::array<Vec, 8> candidate{};
@@ -740,6 +682,7 @@ py::tuple project_xpbd(const DoubleArray& points, const DoubleArray& torso_start
 }
 
 PYBIND11_MODULE(_sew_mimic_cpp, m) {
+  bind_kinematics(m);
   m.doc() = "Native C++17 SEW-Mimic solver";
   m.attr("implementation") = "native";
   py::class_<SewMimicSolver>(m, "SewMimicSolver")

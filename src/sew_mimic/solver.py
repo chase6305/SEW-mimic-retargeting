@@ -91,6 +91,8 @@ class Serial7DoF:
             raise ValueError(f"R_local must have shape (7,3,3), got {self.R_local.shape}")
         if self.q_min.shape != (7,) or self.q_max.shape != (7,):
             raise ValueError("q_min and q_max must each have shape (7,)")
+        if not np.all(np.isfinite(self.q_min)) or not np.all(np.isfinite(self.q_max)):
+            raise ValueError("Joint limits must be finite")
         if np.any(self.q_min > self.q_max):
             raise ValueError("Every q_min must be <= q_max")
 
@@ -126,13 +128,25 @@ class Serial7DoF:
 
     def R_between(self, q: Sequence[float], frame_a: int, frame_b: int) -> np.ndarray:
         """Rotation R^(a,b), mapping a vector in frame b into frame a."""
-        return self.R0(q, frame_a).T @ self.R0(q, frame_b)
+        q = np.asarray(q, dtype=np.float64).reshape(-1)
+        if q.shape != (7,):
+            raise ValueError("q must have shape (7,)")
+        if not 0 <= frame_a <= 7 or not 0 <= frame_b <= 7:
+            raise ValueError("frame must be in [0, 7]")
+        # The shared base-to-ancestor chain cancels. Evaluate only the joints
+        # between the two frames, including the inverse and identity cases.
+        rotation = np.eye(3)
+        for joint in range(min(frame_a, frame_b), max(frame_a, frame_b)):
+            rotation = rotation @ self.joint_rotation(joint, q[joint])
+        return rotation if frame_a <= frame_b else rotation.T
 
     def axis_world(self, q: Sequence[float], joint_number: int) -> np.ndarray:
         """World/base-frame direction of h_i; joint_number is paper-style 1..7."""
         if not 1 <= joint_number <= 7:
             raise ValueError("joint_number must be in [1, 7]")
-        return self.R0(q, joint_number) @ self.axes_local[joint_number - 1]
+        index = joint_number - 1
+        # Rotation around an axis leaves that same axis unchanged.
+        return self.R0(q, index) @ (self.R_local[index] @ self.axes_local[index])
 
     def tool_orientation(self, q: Sequence[float]) -> np.ndarray:
         return self.R0(q, 7) @ self.R_7T_local @ self.R_align
@@ -322,28 +336,22 @@ def align_axis(
     q0 = np.asarray(q0, dtype=np.float64).reshape(-1)
     if q0.shape != (7,):
         raise ValueError("q0 must have shape (7,)")
+    if not np.all(np.isfinite(q0)):
+        raise ValueError("q0 must contain only finite values")
     v = unit(target_vector)
 
     idx_a = joint_number_i - 3  # q_{i-2}, 0-based
     idx_b = joint_number_i - 2  # q_{i-1}, 0-based
     frame = joint_number_i - 2  # frame i-2, paper numbering
 
-    q_base = q0.copy()
-    q_base[idx_a] = 0.0
-    q_base[idx_b] = 0.0
+    # v^(i-2) with q_(i-2)=0: append only its fixed transform to the
+    # already-solved prefix, avoiding a copied joint vector and zero rotation.
+    v_f = (robot.R0(q0, idx_a) @ robot.R_local[idx_a]).T @ v
 
-    # v^(i-2)
-    v_f = robot.R0(q_base, frame).T @ v
-
-    # h_i expressed in frame i-2
-    h_i_f = robot.R_between(q_base, frame, joint_number_i) @ robot.axes_local[joint_number_i - 1]
-
-    # h_{i-1} expressed in frame i-2.
-    # This is R^(i-2,i-1) h_{i-1}; the PDF's Algorithm 2 line 3 appears to
-    # contain a frame-index typo in the printed rotation superscripts.
-    h_prev_f = (
-        robot.R_between(q_base, frame, joint_number_i - 1) @ robot.axes_local[joint_number_i - 2]
-    )
+    # q_(i-1) is zero, and rotating joint i leaves h_i unchanged. Both
+    # local SP2 axes therefore depend only on the fixed model transforms.
+    h_i_f = robot.R_local[frame] @ (robot.R_local[frame + 1] @ robot.axes_local[joint_number_i - 1])
+    h_prev_f = robot.R_local[frame] @ robot.axes_local[joint_number_i - 2]
 
     # In frame i-2, changing q_{i-2} rotates the target by -h_{i-2}; changing
     # q_{i-1} rotates h_i around h_{i-1}.

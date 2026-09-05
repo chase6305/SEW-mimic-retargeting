@@ -68,7 +68,9 @@ class PythonBackend:
         wrists: np.ndarray,
         hand_orientations: np.ndarray,
     ) -> np.ndarray:
-        current = np.asarray(q0, dtype=np.float64)
+        current, shoulders, elbows, wrists, hand_orientations = _validate_batch(
+            q0, shoulders, elbows, wrists, hand_orientations
+        )
         output = np.empty((len(shoulders), 7), dtype=np.float64)
         for index, (shoulder, elbow, wrist, hand) in enumerate(
             zip(shoulders, elbows, wrists, hand_orientations, strict=True)
@@ -144,6 +146,9 @@ class CppBackend:
         wrists: np.ndarray,
         hand_orientations: np.ndarray,
     ) -> np.ndarray:
+        q0, shoulders, elbows, wrists, hand_orientations = _validate_batch(
+            q0, shoulders, elbows, wrists, hand_orientations
+        )
         try:
             result = self._solver_for(robot).solve_batch(
                 q0, shoulders, elbows, wrists, hand_orientations
@@ -151,6 +156,33 @@ class CppBackend:
         except RuntimeError as exc:
             raise SEWMimicError(str(exc)) from exc
         return np.asarray(result, dtype=np.float64)
+
+
+class CppKinematicsBackend:
+    """Native executor for an already prepared, indexed FK plan."""
+
+    def __init__(
+        self,
+        operations: np.ndarray,
+        origins: np.ndarray,
+        axes: np.ndarray,
+        targets: np.ndarray,
+        offsets: np.ndarray,
+        joint_count: int,
+    ) -> None:
+        try:
+            from . import _sew_mimic_cpp
+        except ImportError as exc:
+            raise RuntimeError(
+                "The C++ FK backend is not installed. Build with "
+                "`SEW_MIMIC_BUILD_CPP=1 pip install -e '.[cpp]'`."
+            ) from exc
+        self._model = _sew_mimic_cpp.ForwardKinematics(
+            operations, origins, axes, targets, offsets, joint_count
+        )
+
+    def evaluate(self, q: np.ndarray) -> np.ndarray:
+        return np.asarray(self._model.evaluate(q))
 
 
 class CppCollisionBackend:
@@ -332,6 +364,17 @@ def solve_batch(
     solution from frame ``i-1`` as its branch-selection reference; only frame
     zero uses ``q0``.
     """
+    return get_backend(backend).solve_batch(robot, q0, shoulders, elbows, wrists, hand_orientations)
+
+
+def _validate_batch(
+    q0: Sequence[float],
+    shoulders: np.ndarray,
+    elbows: np.ndarray,
+    wrists: np.ndarray,
+    hand_orientations: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Validate both direct backend and convenience API calls before solving."""
     current = np.asarray(q0, dtype=np.float64).reshape(-1)
     if current.shape != (7,):
         raise ValueError(f"q0 must have shape (7,), got {current.shape}")
@@ -342,7 +385,7 @@ def solve_batch(
         np.asarray(value, dtype=np.float64)
         for value in (shoulders, elbows, wrists, hand_orientations)
     ]
-    sample_count = len(arrays[0])
+    sample_count = arrays[0].shape[0] if arrays[0].ndim else 0
     if (
         arrays[0].shape != (sample_count, 3)
         or any(value.shape != (sample_count, 3) for value in arrays[1:3])
@@ -354,4 +397,4 @@ def solve_batch(
         )
     if any(not np.all(np.isfinite(value)) for value in arrays):
         raise ValueError("Batch inputs must contain only finite values")
-    return get_backend(backend).solve_batch(robot, current, *arrays)
+    return current, arrays[0], arrays[1], arrays[2], arrays[3]

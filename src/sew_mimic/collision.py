@@ -64,17 +64,17 @@ def _closest_points_on_segments_unchecked(
     if aa <= EPS and cc <= EPS:
         return a0, b0, 0.0, 0.0
     if aa <= EPS:
-        s, t = 0.0, float(np.clip(ee / cc, 0.0, 1.0))
+        s, t = 0.0, min(1.0, max(0.0, ee / cc))
     elif cc <= EPS:
-        s, t = float(np.clip(-dd / aa, 0.0, 1.0)), 0.0
+        s, t = min(1.0, max(0.0, -dd / aa)), 0.0
     else:
         denominator = aa * cc - bb * bb
-        s = 0.0 if denominator <= EPS else float(np.clip((bb * ee - cc * dd) / denominator, 0, 1))
+        s = 0.0 if denominator <= EPS else min(1.0, max(0.0, (bb * ee - cc * dd) / denominator))
         t = (bb * s + ee) / cc
         if t < 0.0:
-            t, s = 0.0, float(np.clip(-dd / aa, 0.0, 1.0))
+            t, s = 0.0, min(1.0, max(0.0, -dd / aa))
         elif t > 1.0:
-            t, s = 1.0, float(np.clip((bb - dd) / aa, 0.0, 1.0))
+            t, s = 1.0, min(1.0, max(0.0, (bb - dd) / aa))
 
     return a0 + s * u, b0 + t * v, s, t
 
@@ -93,8 +93,8 @@ def capsule_contact(capsule_a: Capsule, capsule_b: Capsule) -> CapsuleContact:
     return CapsuleContact(
         distance=distance,
         normal=normal,
-        point_a=point_a,
-        point_b=point_b,
+        point_a=point_a + capsule_a.radius * normal,
+        point_b=point_b - capsule_b.radius * normal,
         parameter_a=parameter_a,
         parameter_b=parameter_b,
     )
@@ -108,7 +108,11 @@ def _capsule_contact_unchecked(
     radius_a: float,
     radius_b: float,
 ) -> tuple[float, np.ndarray, np.ndarray, np.ndarray, float, float]:
-    """Internal capsule kernel without allocations for input validation."""
+    """Return centerline contact data needed by XPBD.
+
+    Only the public contact report constructs capsule surface points; the
+    projection loop needs distance, normal and segment parameters.
+    """
     point_a, point_b, parameter_a, parameter_b = _closest_points_on_segments_unchecked(
         start_a, end_a, start_b, end_b
     )
@@ -127,8 +131,8 @@ def _capsule_contact_unchecked(
     return (
         center_distance - radius_a - radius_b,
         normal,
-        point_a + radius_a * normal,
-        point_b - radius_b * normal,
+        point_a,
+        point_b,
         parameter_a,
         parameter_b,
     )

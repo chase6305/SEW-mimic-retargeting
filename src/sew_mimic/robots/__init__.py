@@ -8,6 +8,7 @@ from .arm_loader import (
 )
 from .capsule_config import CapsuleMeshSpec, estimate_capsule_config_from_meshes
 from .demo_profiles import CollisionDemoProfile
+from .kinematics import CompiledKinematics
 from .marvin_m6 import (
     DEFAULT_MARVIN_URDF,
     MarvinArm,
@@ -55,6 +56,7 @@ __all__ = [
     "BimanualPoseFunction",
     "CapsuleMeshSpec",
     "CollisionDemoProfile",
+    "CompiledKinematics",
     "LoadedSerialArm",
     "SerialArmSpec",
     "SerialRobotArm",

@@ -15,6 +15,7 @@ if os.getenv("SEW_MIMIC_BUILD_CPP", "0") == "1":
         Pybind11Extension(
             "sew_mimic._sew_mimic_cpp",
             ["src/cpp/sew_mimic_cpp.cpp"],
+            depends=["src/cpp/kinematics.h", "src/cpp/math_utils.h"],
             cxx_std=17,
             extra_compile_args=["/O2"] if sys.platform == "win32" else ["-O3"],
         )

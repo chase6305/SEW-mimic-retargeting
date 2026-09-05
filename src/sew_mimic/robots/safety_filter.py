@@ -89,6 +89,22 @@ class RobotSafetyFilter:
     def _solve_right(self, current: np.ndarray, pose: ArmPose) -> np.ndarray:
         return self._solve_arm(self.right, current, pose)
 
+    def retarget(
+        self,
+        pose: BimanualPose,
+        q_left_current: np.ndarray,
+        q_right_current: np.ndarray,
+    ) -> SafetyFilterResult:
+        """Solve a calibrated world-frame target, then filter the robot command.
+
+        Input/initial IK errors propagate to the caller, which owns hold/recovery
+        policy. This method neither sends commands nor checks input freshness.
+        """
+        pose.points()
+        q_left_desired = self._solve_left(q_left_current, pose.left)
+        q_right_desired = self._solve_right(q_right_current, pose.right)
+        return self.filter(q_left_current, q_right_current, q_left_desired, q_right_desired)
+
     def filter(
         self,
         q_left_current: np.ndarray,

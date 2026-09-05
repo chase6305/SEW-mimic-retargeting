@@ -158,7 +158,7 @@ class MarvinSafetyFilter(RobotSafetyFilter):
         resolved_config = (
             estimate_marvin_capsule_config(path, padding=padding) if config is None else config
         )
-        pose_evaluator = URDFBimanualPoseEvaluator(kinematics, left, right)
+        pose_evaluator = URDFBimanualPoseEvaluator(kinematics, left, right, backend=backend)
         super().__init__(
             path,
             left=left,

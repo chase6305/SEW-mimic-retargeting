@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from typing import NamedTuple
 
 import numpy as np
 
@@ -20,12 +21,47 @@ def _positive_finite(name: str, value: float | np.ndarray) -> np.ndarray:
 
 def _smoothing_factor(cutoff: float | np.ndarray, dt: float) -> np.ndarray:
     """Return exact first-order low-pass gain for cutoff in hertz."""
-    return 1.0 - np.exp(-2.0 * np.pi * np.asarray(cutoff) * dt)
+    return -np.expm1(-2.0 * np.pi * np.asarray(cutoff) * dt)
 
 
 def _scalar_smoothing_factor(cutoff: float, dt: float) -> float:
     """Scalar specialization avoiding NumPy dispatch in SO(3) hot loops."""
-    return 1.0 - math.exp(-2.0 * math.pi * cutoff * dt)
+    return -math.expm1(-2.0 * math.pi * cutoff * dt)
+
+
+@dataclass(frozen=True)
+class OneEuroConfig:
+    """Immutable tuning parameters; cutoffs are Hz, beta depends on signal units."""
+
+    min_cutoff: float = 1.0
+    beta: float = 0.02
+    derivative_cutoff: float = 1.0
+
+    def __post_init__(self) -> None:
+        for name in ("min_cutoff", "beta", "derivative_cutoff"):
+            value = np.asarray(getattr(self, name))
+            if value.ndim != 0 or value.dtype.kind not in "fiu":
+                raise ValueError(f"{name} must be a finite scalar")
+            scalar = float(value)
+            if not math.isfinite(scalar) or scalar < 0 or (name != "beta" and scalar == 0):
+                raise ValueError(
+                    f"{name} must be finite and {'nonnegative' if name == 'beta' else 'positive'}"
+                )
+            object.__setattr__(self, name, scalar)
+
+
+class _ValueState(NamedTuple):
+    timestamp: float
+    raw_value: np.ndarray
+    value: np.ndarray
+    derivative: np.ndarray
+
+
+class _RotationState(NamedTuple):
+    timestamp: float
+    raw_quaternion: np.ndarray
+    quaternion: np.ndarray
+    angular_velocity: float
 
 
 @dataclass
@@ -47,10 +83,12 @@ class OneEuroFilter:
     _derivative: np.ndarray | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
-        _positive_finite("min_cutoff", self.min_cutoff)
-        _positive_finite("derivative_cutoff", self.derivative_cutoff)
-        if not np.isfinite(self.beta) or self.beta < 0.0:
-            raise ValueError("beta must be finite and nonnegative")
+        config = OneEuroConfig(self.min_cutoff, self.beta, self.derivative_cutoff)
+        self.min_cutoff, self.beta, self.derivative_cutoff = (
+            config.min_cutoff,
+            config.beta,
+            config.derivative_cutoff,
+        )
 
     def reset(self) -> None:
         """Discard timestamp, value, and derivative history."""
@@ -60,34 +98,42 @@ class OneEuroFilter:
         self._derivative = None
 
     def update(self, timestamp: float, observation: np.ndarray | float) -> np.ndarray:
-        """Filter one finite observation and return an owned float64 array."""
+        """Filter an observation; rejected input leaves history unchanged."""
+        state = self._prepare(timestamp, observation)
+        self._commit(state)
+        return state.value.copy()
+
+    def _commit(self, state: _ValueState) -> None:
+        self._timestamp, self._raw_value, self._value, self._derivative = state
+
+    def _prepare(self, timestamp: float, observation: np.ndarray | float) -> _ValueState:
+        """Compute and validate the next state without changing history."""
+        timestamp = float(timestamp)
         value = np.asarray(observation, dtype=np.float64)
         if not np.isfinite(timestamp) or not np.all(np.isfinite(value)):
             raise ValueError("timestamp and observation must be finite")
         if self._timestamp is None:
-            self._timestamp = float(timestamp)
-            self._raw_value = value.copy()
-            self._value = value.copy()
-            self._derivative = np.zeros_like(value)
-            return self._value.copy()
+            return _ValueState(timestamp, value.copy(), value.copy(), np.zeros_like(value))
         assert self._raw_value is not None and self._value is not None
         assert self._derivative is not None
         if value.shape != self._value.shape:
             raise ValueError(f"observation shape changed from {self._value.shape} to {value.shape}")
         dt = float(timestamp - self._timestamp)
-        if dt <= 0.0:
-            raise ValueError("timestamps must increase strictly")
-        raw_derivative = (value - self._raw_value) / dt
-        derivative_alpha = _smoothing_factor(self.derivative_cutoff, dt)
-        derivative = self._derivative + derivative_alpha * (raw_derivative - self._derivative)
-        cutoff = self.min_cutoff + self.beta * np.abs(derivative)
-        value_alpha = _smoothing_factor(cutoff, dt)
-        filtered = self._value + value_alpha * (value - self._value)
-        self._timestamp = float(timestamp)
-        self._raw_value = value.copy()
-        self._value = filtered
-        self._derivative = derivative
-        return filtered.copy()
+        if not math.isfinite(dt) or dt <= 0.0:
+            raise ValueError("timestamps must increase strictly with a finite interval")
+        try:
+            with np.errstate(over="raise", invalid="raise", divide="raise"):
+                raw_derivative = (value - self._raw_value) / dt
+                derivative_alpha = _smoothing_factor(self.derivative_cutoff, dt)
+                derivative = self._derivative + derivative_alpha * (
+                    raw_derivative - self._derivative
+                )
+                cutoff = self.min_cutoff + self.beta * np.abs(derivative)
+                value_alpha = _smoothing_factor(cutoff, dt)
+                filtered = self._value + value_alpha * (value - self._value)
+        except FloatingPointError as exc:
+            raise ValueError("Position filter arithmetic exceeded the finite range") from exc
+        return _ValueState(timestamp, value.copy(), filtered, derivative)
 
 
 @dataclass
@@ -202,10 +248,12 @@ class OneEuroRotationFilter:
     _angular_velocity: float = field(default=0.0, init=False, repr=False)
 
     def __post_init__(self) -> None:
-        _positive_finite("min_cutoff", self.min_cutoff)
-        _positive_finite("derivative_cutoff", self.derivative_cutoff)
-        if not np.isfinite(self.beta) or self.beta < 0.0:
-            raise ValueError("beta must be finite and nonnegative")
+        config = OneEuroConfig(self.min_cutoff, self.beta, self.derivative_cutoff)
+        self.min_cutoff, self.beta, self.derivative_cutoff = (
+            config.min_cutoff,
+            config.beta,
+            config.derivative_cutoff,
+        )
 
     def reset(self) -> None:
         """Discard orientation and angular-velocity history."""
@@ -215,29 +263,43 @@ class OneEuroRotationFilter:
         self._angular_velocity = 0.0
 
     def update(self, timestamp: float, rotation: np.ndarray) -> np.ndarray:
-        """Filter one SO(3) observation and return a valid rotation matrix."""
+        """Filter an SO(3) observation; rejected input leaves history unchanged."""
+        state, result = self._prepare(timestamp, rotation)
+        self._commit(state)
+        return result
+
+    def _commit(self, state: _RotationState) -> None:
+        self._timestamp, self._raw_quaternion, self._quaternion, self._angular_velocity = state
+
+    def _prepare(self, timestamp: float, rotation: np.ndarray) -> tuple[_RotationState, np.ndarray]:
+        timestamp = float(timestamp)
         if not np.isfinite(timestamp) or (self.validate_input and not is_rotation_matrix(rotation)):
             raise ValueError("timestamp must be finite and rotation must be SO(3)")
         quaternion = _rotation_quaternion(rotation)
         if self._timestamp is None:
-            self._timestamp = float(timestamp)
-            self._raw_quaternion = quaternion.copy()
-            self._quaternion = quaternion.copy()
-            return np.asarray(rotation, dtype=np.float64).copy()
+            return (
+                _RotationState(timestamp, quaternion.copy(), quaternion.copy(), 0.0),
+                np.asarray(rotation, dtype=np.float64).copy(),
+            )
         assert self._raw_quaternion is not None and self._quaternion is not None
         dt = float(timestamp - self._timestamp)
-        if dt <= 0.0:
-            raise ValueError("timestamps must increase strictly")
+        if not math.isfinite(dt) or dt <= 0.0:
+            raise ValueError("timestamps must increase strictly with a finite interval")
         relative_dot = min(abs(float(self._raw_quaternion @ quaternion)), 1.0)
         raw_speed = 2.0 * math.acos(relative_dot) / dt
         derivative_alpha = _scalar_smoothing_factor(self.derivative_cutoff, dt)
-        self._angular_velocity += derivative_alpha * (raw_speed - self._angular_velocity)
-        cutoff = self.min_cutoff + self.beta * self._angular_velocity
+        angular_velocity = self._angular_velocity + derivative_alpha * (
+            raw_speed - self._angular_velocity
+        )
+        cutoff = self.min_cutoff + self.beta * angular_velocity
+        if not all(math.isfinite(value) for value in (raw_speed, angular_velocity, cutoff)):
+            raise ValueError("Rotation filter arithmetic exceeded the finite range")
         fraction = _scalar_smoothing_factor(cutoff, dt)
-        self._quaternion = _slerp(self._quaternion, quaternion, fraction)
-        self._raw_quaternion = quaternion.copy()
-        self._timestamp = float(timestamp)
-        return _quaternion_rotation(self._quaternion)
+        filtered = _slerp(self._quaternion, quaternion, fraction)
+        return (
+            _RotationState(timestamp, quaternion.copy(), filtered, angular_velocity),
+            _quaternion_rotation(filtered),
+        )
 
 
 @dataclass
@@ -246,12 +308,17 @@ class BimanualPoseFilter:
 
     ``validate_rotations=False`` removes duplicate SO(3) checks for trusted FK
     output. Keep the default enabled for measurements from external trackers.
+    ``rotation_config`` tunes angular smoothing independently of position.
+    With ``tool_length``, filter only the six SEW positions and reconstruct
+    virtual +X tool markers from the filtered wrists and orientations.
     """
 
     min_cutoff: float = 1.0
     beta: float = 0.02
     derivative_cutoff: float = 1.0
     validate_rotations: bool = True
+    rotation_config: OneEuroConfig | None = field(default=None, kw_only=True)
+    tool_length: float | None = field(default=None, kw_only=True)
     _points: OneEuroFilter = field(init=False, repr=False)
     _left_orientation: OneEuroRotationFilter = field(init=False, repr=False)
     _right_orientation: OneEuroRotationFilter = field(init=False, repr=False)
@@ -259,12 +326,27 @@ class BimanualPoseFilter:
     def __post_init__(self) -> None:
         parameters = (self.min_cutoff, self.beta, self.derivative_cutoff)
         self._points = OneEuroFilter(*parameters)
-        self._left_orientation = OneEuroRotationFilter(
-            *parameters, validate_input=self.validate_rotations
-        )
-        self._right_orientation = OneEuroRotationFilter(
-            *parameters, validate_input=self.validate_rotations
-        )
+        if self.rotation_config is not None:
+            if not isinstance(self.rotation_config, OneEuroConfig):
+                raise ValueError("rotation_config must be OneEuroConfig or None")
+            parameters = (
+                self.rotation_config.min_cutoff,
+                self.rotation_config.beta,
+                self.rotation_config.derivative_cutoff,
+            )
+        if self.tool_length is not None:
+            length = np.asarray(self.tool_length)
+            if (
+                length.ndim != 0
+                or length.dtype.kind not in "fiu"
+                or not np.isfinite(length)
+                or length <= 0
+            ):
+                raise ValueError("tool_length must be finite and positive, or None")
+            self.tool_length = float(length)
+        # The complete observation is validated before any component advances.
+        self._left_orientation = OneEuroRotationFilter(*parameters, validate_input=False)
+        self._right_orientation = OneEuroRotationFilter(*parameters, validate_input=False)
 
     def reset(self) -> None:
         """Clear position and orientation histories for both arms."""
@@ -273,11 +355,42 @@ class BimanualPoseFilter:
         self._right_orientation.reset()
 
     def update(self, timestamp: float, pose: BimanualPose) -> BimanualPose:
-        """Filter a complete bimanual pose while preserving its structure."""
-        points = self._points.update(timestamp, pose.keypoints())
-        left_orientation = self._left_orientation.update(timestamp, pose.left.tool_orientation)
-        right_orientation = self._right_orientation.update(timestamp, pose.right.tool_orientation)
-        return BimanualPose(
-            ArmPose(*points[:4], left_orientation),
-            ArmPose(*points[4:], right_orientation),
+        """Filter a pose; rejected observations leave all histories unchanged."""
+        observation = pose.points() if self.validate_rotations else pose.keypoints()
+        if self.tool_length is not None:
+            observation = observation[[0, 1, 2, 4, 5, 6]]
+        position_state = self._points._prepare(timestamp, observation)
+        left_state, left_orientation = self._left_orientation._prepare(
+            timestamp, pose.left.tool_orientation
         )
+        right_state, right_orientation = self._right_orientation._prepare(
+            timestamp, pose.right.tool_orientation
+        )
+        points = position_state.value.copy()
+        if self.tool_length is None:
+            result = BimanualPose(
+                ArmPose(*points[:4], left_orientation),
+                ArmPose(*points[4:], right_orientation),
+            )
+        else:
+            try:
+                with np.errstate(over="raise", invalid="raise"):
+                    result = BimanualPose(
+                        ArmPose(
+                            *points[:3],
+                            points[2] + self.tool_length * left_orientation[:, 0],
+                            left_orientation,
+                        ),
+                        ArmPose(
+                            *points[3:],
+                            points[5] + self.tool_length * right_orientation[:, 0],
+                            right_orientation,
+                        ),
+                    )
+            except FloatingPointError as exc:
+                raise ValueError("Filtered tool marker exceeded the finite range") from exc
+        # Commit the whole pose only after every component has succeeded.
+        self._points._commit(position_state)
+        self._left_orientation._commit(left_state)
+        self._right_orientation._commit(right_state)
+        return result

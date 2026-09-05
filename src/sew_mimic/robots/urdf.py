@@ -12,6 +12,7 @@ from pathlib import Path
 import numpy as np
 
 from ..utility import skew, unit
+from .kinematics import CompiledKinematics, _KinematicsPlan
 
 logger = logging.getLogger(__name__)
 _IDENTITY_3 = np.eye(3)
@@ -175,3 +176,52 @@ class URDFKinematics:
                 transforms[child] = transforms[parent] @ origin
         logger.debug("URDF FK completed: resolved_links=%d", len(transforms))
         return transforms
+
+    def compile(
+        self,
+        joint_names: Collection[str],
+        required_links: Collection[str],
+        *,
+        backend: str = "python",
+    ) -> CompiledKinematics:
+        """Prepare ordered FK once for repeated evaluation on either backend.
+
+        Unlisted joints stay at zero, matching ``link_transforms`` defaults.
+        Their transforms and fixed chains are folded into the next moving
+        joint or target link. Output order, including duplicates, is preserved.
+        """
+        names, links = tuple(joint_names), tuple(required_links)
+        if len(set(names)) != len(names):
+            raise ValueError("joint_names must be unique")
+        known = {
+            name
+            for name, kind, *_ in self.joints
+            if kind in ("revolute", "continuous", "prismatic")
+        }
+        unknown = set(names) - known
+        if unknown:
+            raise KeyError(f"Unknown movable URDF joints: {sorted(unknown)}")
+        joint_indices = {name: index for index, name in enumerate(names)}
+        frames = {self.root_link: (0, np.eye(4))}
+        operations, origins, axes = [], [], []
+        for name, kind, parent, child, origin, axis in self._joint_plan(frozenset(links)):
+            parent_index, fixed = frames[parent]
+            combined = fixed @ origin
+            if name in joint_indices:
+                motion = 2 if kind == "prismatic" else 1
+                operations.append((parent_index, motion, joint_indices[name]))
+                origins.append(combined)
+                axes.append(unit(axis))
+                frames[child] = (len(operations), np.eye(4))
+            else:
+                frames[child] = (parent_index, combined)
+        plan = _KinematicsPlan(
+            names,
+            links,
+            np.asarray(operations, dtype=np.int32).reshape(-1, 3),
+            np.asarray(origins, dtype=np.float64).reshape(-1, 4, 4),
+            np.asarray(axes, dtype=np.float64).reshape(-1, 3),
+            np.asarray([frames[link][0] for link in links], dtype=np.int32),
+            np.asarray([frames[link][1] for link in links], dtype=np.float64).reshape(-1, 4, 4),
+        )
+        return CompiledKinematics(plan, backend=backend)

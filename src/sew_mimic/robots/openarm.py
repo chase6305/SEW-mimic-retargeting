@@ -135,7 +135,7 @@ class OpenArmSafetyFilter(RobotSafetyFilter):
         right = load_openarm_arm(path, "right")
         kinematics = URDFKinematics(path)
         resolved_config = config or estimate_openarm_capsule_config(path, padding=padding)
-        pose_evaluator = URDFBimanualPoseEvaluator(kinematics, left, right)
+        pose_evaluator = URDFBimanualPoseEvaluator(kinematics, left, right, backend=backend)
         super().__init__(
             path,
             left=left,

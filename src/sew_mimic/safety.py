@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import math
+import operator
 from dataclasses import dataclass, field
 from enum import Enum, IntEnum
 from typing import Callable
@@ -11,7 +13,7 @@ import numpy as np
 
 from .backends import get_cpp_collision_backend
 from .collision import _capsule_contact_unchecked, _capsule_distances_unchecked
-from .utility import EPS, SEWMimicError, is_rotation_matrix, rot, unit
+from .utility import EPS, SEWMimicError, is_rotation_matrix, unit
 
 logger = logging.getLogger(__name__)
 
@@ -119,8 +121,8 @@ class SafetyFilterConfig:
     interpolation_point_radii: np.ndarray = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        torso_start = np.asarray(self.torso_start, dtype=np.float64)
-        torso_end = np.asarray(self.torso_end, dtype=np.float64)
+        torso_start = np.array(self.torso_start, dtype=np.float64, copy=True)
+        torso_end = np.array(self.torso_end, dtype=np.float64, copy=True)
         if (
             torso_start.shape != (3,)
             or torso_end.shape != (3,)
@@ -139,12 +141,29 @@ class SafetyFilterConfig:
             raise ValueError(
                 "Distances must obey minimum_distance <= activation_distance <= release_distance"
             )
-        if self.compliance < 0.0 or self.tolerance < 0.0:
-            raise ValueError("compliance and tolerance must be nonnegative")
-        if self.iterations <= 0 or self.interpolation_limit <= 0:
-            raise ValueError("iterations and interpolation_limit must be positive")
+        for name in ("compliance", "tolerance"):
+            value = getattr(self, name)
+            if not np.isfinite(value) or value < 0.0:
+                raise ValueError(f"{name} must be finite and nonnegative")
+        for name in ("iterations", "interpolation_limit"):
+            value = getattr(self, name)
+            try:
+                normalized_value = operator.index(value)
+            except TypeError as exc:
+                raise ValueError(f"{name} must be a positive integer") from exc
+            if (
+                isinstance(value, (bool, np.bool_))
+                or not 0 < normalized_value <= np.iinfo(np.int32).max
+            ):
+                raise ValueError(f"{name} must be a positive 32-bit integer")
+            object.__setattr__(self, name, normalized_value)
         pairs = COLLISION_PAIRS if self.collision_pairs is None else self.collision_pairs
-        normalized = tuple((int(first), int(second)) for first, second in pairs)
+        try:
+            normalized = tuple(
+                (operator.index(first), operator.index(second)) for first, second in pairs
+            )
+        except TypeError as exc:
+            raise ValueError("collision pair indices must be integers") from exc
         if not normalized:
             raise ValueError("collision_pairs must not be empty")
         if any(first < 0 or second > 6 or first >= second for first, second in normalized):
@@ -308,6 +327,8 @@ def find_first_collision(
     desired = np.asarray(desired_points, dtype=np.float64)
     if initial.shape != (8, 3) or desired.shape != (8, 3):
         raise ValueError("Bimanual point arrays must have shape (8, 3)")
+    if not np.all(np.isfinite(initial)) or not np.all(np.isfinite(desired)):
+        raise ValueError("Bimanual point arrays must contain only finite values")
     if backend == "cpp":
         return get_cpp_collision_backend().first_collision(
             initial,
@@ -434,13 +455,25 @@ def recover_tool_orientation(current: np.ndarray, target_direction: np.ndarray) 
         raise ValueError("current must be a valid SO(3) matrix")
     current_direction = current[:, 0]
     target = unit(target_direction)
-    cosine = float(np.clip(current_direction @ target, -1.0, 1.0))
-    axis = np.cross(current_direction, target)
-    if np.linalg.norm(axis) <= EPS:
+    cosine = min(1.0, max(-1.0, float(current_direction @ target)))
+    x, y, z = current_direction
+    tx, ty, tz = target
+    axis = np.array([y * tz - z * ty, z * tx - x * tz, x * ty - y * tx])
+    if cosine < -0.99:
+        # Near 180 degrees, cancellation in the cross product amplifies its
+        # tiny component along the source axis when normalized. Remove it.
+        axis -= float(axis @ current_direction) * current_direction
+    sine = math.sqrt(float(axis @ axis))
+    if sine <= EPS:
         if cosine > 0.0:
             return current.copy()
-        axis = unit(np.cross(current_direction, [0.0, 1.0, 0.0]))
-    return rot(axis, float(np.arccos(cosine))) @ current
+        # The tool's own Y axis is always perpendicular to its X direction,
+        # including when that direction coincides with the world's Y axis.
+        return current * np.array([-1.0, 1.0, -1.0])
+    x, y, z = axis / sine
+    cross = np.array([[0.0, -z, y], [z, 0.0, -x], [-y, x, 0.0]])
+    rotation = np.eye(3) + sine * cross + (1.0 - cosine) * (cross @ cross)
+    return rotation @ current
 
 
 def sew_safety_filter(

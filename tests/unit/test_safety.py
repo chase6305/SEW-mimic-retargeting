@@ -1,4 +1,5 @@
 import logging
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -13,6 +14,7 @@ from sew_mimic import (
     find_first_collision,
     minimum_capsule_distance,
     recover_tool_orientation,
+    rot,
     sew_safety_filter,
 )
 from sew_mimic.backends import get_cpp_collision_backend
@@ -96,6 +98,25 @@ def test_recover_tool_orientation_aligns_x_axis():
     assert np.allclose(recovered[:, 0], [0.0, 1.0, 0.0])
 
 
+def test_orientation_recovery_handles_opposite_world_y_direction():
+    current = rot([0, 0, 1], np.pi / 2)
+    recovered = recover_tool_orientation(current, [0, -1, 0])
+    np.testing.assert_allclose(recovered[:, 0], [0, -1, 0], atol=1e-14)
+    np.testing.assert_allclose(recovered.T @ recovered, np.eye(3), atol=1e-14)
+    assert np.linalg.det(recovered) == pytest.approx(1.0)
+
+
+def test_orientation_recovery_preserves_so3_for_random_and_nearly_opposite_targets():
+    rng = np.random.default_rng(405)
+    for _ in range(100):
+        current = rot(rng.normal(size=3), rng.uniform(-np.pi, np.pi))
+        for target in (rng.normal(size=3), -current[:, 0] + 1e-9 * current[:, 1], current[:, 0]):
+            recovered = recover_tool_orientation(current, target)
+            np.testing.assert_allclose(recovered[:, 0], target / np.linalg.norm(target), atol=1e-8)
+            np.testing.assert_allclose(recovered.T @ recovered, np.eye(3), atol=1e-12)
+            assert np.linalg.det(recovered) == pytest.approx(1.0)
+
+
 def test_keypoint_extraction_skips_unneeded_orientation_validation():
     pose = _pose(0.3)
     invalid_left = ArmPose(
@@ -158,6 +179,50 @@ def test_safety_config_caches_read_only_geometry_arrays():
     assert not config.capsule_radii.flags.writeable
     assert not config.interpolation_point_radii.flags.writeable
     assert not config.collision_pair_indices.flags.writeable
+
+
+def test_safety_config_owns_geometry_without_freezing_callers_arrays():
+    storage = np.array([[0.0, 0.0, -2.0], [0.0, 0.0, -1.0]])
+    config = replace(_config(), torso_start=storage[0], torso_end=storage[1])
+    assert storage.flags.writeable
+    assert not np.shares_memory(config.torso_start, storage)
+    assert not np.shares_memory(config.torso_end, storage)
+    storage[:] = 100.0
+    np.testing.assert_array_equal(config.torso_start, [0.0, 0.0, -2.0])
+    np.testing.assert_array_equal(config.torso_end, [0.0, 0.0, -1.0])
+
+
+@pytest.mark.parametrize("name", ["compliance", "tolerance"])
+@pytest.mark.parametrize("value", [np.nan, np.inf, -np.inf, -1.0])
+def test_safety_config_rejects_invalid_projection_parameters(name, value):
+    with pytest.raises(ValueError, match=name):
+        replace(_config(), **{name: value})
+
+
+@pytest.mark.parametrize("name", ["iterations", "interpolation_limit"])
+@pytest.mark.parametrize("value", [1.5, np.nan, np.inf, True, 0, -1, 2**31])
+def test_safety_config_requires_bounded_integer_iteration_counts(name, value):
+    with pytest.raises(ValueError, match=name):
+        replace(_config(), **{name: value})
+
+
+def test_safety_config_rejects_fractional_capsule_indices():
+    with pytest.raises(ValueError, match="integers"):
+        replace(_config(), collision_pairs=((1.5, 4),))
+
+
+@pytest.mark.skipif(not cpp_backend_available(), reason="native extension is not built")
+def test_cpp_sampling_clamps_large_displacements_before_integer_conversion():
+    config = replace(_config(), collision_pairs=((3, 6),))
+    initial = _pose(0.3).keypoints()
+    initial[2:4, 1] = initial[6:8, 1]
+    initial[2:4, 0] -= 1e9
+    desired = initial.copy()
+    desired[2:4, 0] += 2e9
+    expected = find_first_collision(initial, desired, config, backend="python")
+    actual = find_first_collision(initial, desired, config, backend="cpp")
+    np.testing.assert_allclose(actual, expected, atol=1e-7)
+    assert minimum_capsule_distance(actual, config) < config.activation_distance
 
 
 @pytest.mark.skipif(not cpp_backend_available(), reason="native extension is not built")

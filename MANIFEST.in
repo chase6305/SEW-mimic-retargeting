@@ -1,2 +1,3 @@
 include src/cpp/*.cpp
+include src/cpp/*.h
 include src/cpp/CMakeLists.txt

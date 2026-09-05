@@ -28,6 +28,7 @@ from .collision import (
 from .filtering import (
     BimanualPoseFilter,
     JointRateLimiter,
+    OneEuroConfig,
     OneEuroFilter,
     OneEuroRotationFilter,
 )
@@ -81,6 +82,7 @@ __all__ = [
     "DegenerateGeometryError",
     "JointLimitError",
     "JointRateLimiter",
+    "OneEuroConfig",
     "OneEuroFilter",
     "OneEuroRotationFilter",
     "SEWMimicError",

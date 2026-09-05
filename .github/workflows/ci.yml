@@ -26,7 +26,7 @@ jobs:
       - name: Check formatting
         run: |
           ruff format --check src examples benchmarks scripts tests setup.py
-          mdformat --check README.md
+          mdformat --check README.md docs/*.md
       - name: Lint
         run: ruff check src examples benchmarks scripts tests setup.py
       - name: Test
@@ -57,7 +57,7 @@ jobs:
       - name: Verify native extension identity
         run: python -c "from sew_mimic import backend_status; assert backend_status()['cpp_implementation'] == 'native'"
       - name: Check C++ formatting
-        run: clang-format --dry-run --Werror src/cpp/sew_mimic_cpp.cpp
+        run: clang-format --dry-run --Werror src/cpp/*.cpp src/cpp/*.h
       - name: Run Python/C++ parity and integration tests
         run: pytest
       - name: Build native wheel

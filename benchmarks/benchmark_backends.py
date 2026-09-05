@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import argparse
 import logging
+import math
 import statistics
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 
@@ -14,8 +16,9 @@ from examples.demo_robot_collision_avoidance import (
     collision_test_trajectory,
     plan_filtered_trajectory,
 )
-from sew_mimic import backend_status, minimum_capsule_distance, solve
+from sew_mimic import backend_status, get_backend, minimum_capsule_distance, solve, solve_batch
 from sew_mimic.robots import MarvinSafetyFilter, load_marvin_arm
+from sew_mimic.robots.marvin_m6 import DEFAULT_MARVIN_URDF
 
 
 @dataclass(frozen=True)
@@ -87,19 +90,44 @@ def main() -> None:
     parser.add_argument("--iterations", type=int, default=20_000)
     parser.add_argument("--trajectory-fps", type=float, default=30.0)
     parser.add_argument("--repeats", type=int, default=3)
+    parser.add_argument("--batch-size", type=int, default=256)
+    parser.add_argument("--urdf", type=Path, default=DEFAULT_MARVIN_URDF)
+    parser.add_argument("--backends", nargs="+", choices=("python", "cpp"))
     args = parser.parse_args()
-    if args.iterations <= 0 or args.trajectory_fps <= 0.0 or args.repeats <= 0:
-        parser.error("iterations, trajectory-fps, and repeats must be positive")
+    if (
+        args.iterations <= 0
+        or not math.isfinite(args.trajectory_fps)
+        or args.trajectory_fps <= 0.0
+        or args.repeats <= 0
+        or args.batch_size <= 0
+    ):
+        parser.error(
+            "iterations, trajectory-fps, repeats, and batch-size must be finite and positive"
+        )
     logging.disable(logging.WARNING)
-    print("Backend status:", backend_status())
+    status = backend_status()
+    print("Backend status:", status)
+    backends = args.backends or (["python", "cpp"] if status["cpp_available"] else ["python"])
+    for backend in backends:
+        get_backend(backend)  # Fail before measuring if an explicitly requested backend is missing.
 
-    arm = load_marvin_arm(side="left")
+    arm = load_marvin_arm(args.urdf, side="left")
     q_reference = np.array([-1.2, -0.8, 1.0, -1.2, 0.0, 0.0, 0.0])
     shoulder = np.zeros(3)
     elbow = 0.287 * arm.robot.axis_world(q_reference, 3)
     wrist = elbow + 0.314 * arm.robot.axis_world(q_reference, 5)
     hand = arm.robot.tool_orientation(q_reference)
-    for backend in ("python", "cpp"):
+    print_measurement(
+        "python",
+        "relative:",
+        timed(lambda: arm.robot.R_between(q_reference, 3, 5), args.iterations, args.repeats),
+        rate_unit="queries/s",
+        latency_unit="ms/query",
+    )
+    batch_inputs = [
+        np.repeat(value[None], args.batch_size, axis=0) for value in (shoulder, elbow, wrist, hand)
+    ]
+    for backend in backends:
         q_current = np.zeros(7)
 
         def solve_frame() -> None:
@@ -121,10 +149,32 @@ def main() -> None:
             rate_unit="solves/s",
             latency_unit="ms/solve",
         )
+        print_measurement(
+            backend,
+            "SEW batch:",
+            timed_batch(
+                lambda: solve_batch(arm.robot, np.zeros(7), *batch_inputs, backend=backend),
+                args.batch_size,
+                args.repeats,
+            ),
+            rate_unit="solves/s",
+            latency_unit="ms/solve",
+        )
 
     _, left, right = collision_test_trajectory(12.0, args.trajectory_fps)
-    for backend in ("python", "cpp"):
-        safety_filter = MarvinSafetyFilter(backend=backend)
+    for backend in backends:
+        safety_filter = MarvinSafetyFilter(args.urdf, backend=backend)
+        print_measurement(
+            backend,
+            "FK:",
+            timed(
+                lambda: safety_filter.forward_kinematics(left[0], right[0]),
+                args.iterations,
+                args.repeats,
+            ),
+            rate_unit="frames/s",
+            latency_unit="ms/frame",
+        )
         pose = safety_filter.forward_kinematics(left[len(left) // 2], right[len(right) // 2])
         capsule_result = timed(
             lambda: minimum_capsule_distance(pose.points(), safety_filter.config, backend=backend),
