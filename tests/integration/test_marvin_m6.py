@@ -9,7 +9,6 @@ from examples.demo_robot_collision_avoidance import (
 )
 from examples.demo_robot_viser import (
     humanlike_reference_trajectory,
-    minimum_jerk_trajectory,
     openarm_reference_trajectory,
     reference_keypoint_trajectory,
     retarget_reference_trajectory,
@@ -35,19 +34,6 @@ from sew_mimic.robots import (
     urdf_bimanual_pose,
     validate_robot_adapter,
 )
-
-
-def test_minimum_jerk_trajectory_endpoints():
-    q0 = np.array([0.0, -0.2, 0.3])
-    q1 = np.array([1.0, 0.4, -0.5])
-    times, positions = minimum_jerk_trajectory(q0, q1, duration=2.0, fps=20.0)
-    assert len(times) == 41
-    assert np.allclose(positions[0], q0)
-    assert np.allclose(positions[-1], q1)
-    assert np.all(np.diff(times) > 0.0)
-    # The analytic minimum-jerk blend has zero endpoint velocity.
-    assert np.linalg.norm(positions[1] - positions[0]) < 1e-3
-    assert np.linalg.norm(positions[-1] - positions[-2]) < 1e-3
 
 
 def test_humanlike_trajectory_is_smooth_and_closed():
@@ -98,11 +84,17 @@ def test_marvin_urdf_fk_to_sew(side):
 
 @pytest.mark.skipif(not Path(DEFAULT_MARVIN_URDF).is_file(), reason="Marvin asset is not installed")
 @pytest.mark.parametrize("side", ["left", "right"])
-def test_humanlike_trajectory_retargets_both_arms(side):
+@pytest.mark.parametrize("backend", ["python", "cpp"])
+def test_humanlike_trajectory_retargets_both_arms(side, backend):
+    if backend == "cpp" and not cpp_backend_available():
+        pytest.skip("native extension is not built")
     robot = load_marvin_arm(side=side).robot
     _, reference = humanlike_reference_trajectory(side, duration=1.0, fps=10.0)
-    solved, max_error = retarget_reference_trajectory(robot, reference)
+    timings = []
+    solved, max_error = retarget_reference_trajectory(robot, reference, timings, backend)
     assert solved.shape == reference.shape
+    assert len(timings) == len(reference)
+    assert np.all(np.asarray(timings) > 0.0)
     assert max_error < 1e-8
     assert np.all(solved >= robot.q_min - 1e-10)
     assert np.all(solved <= robot.q_max + 1e-10)

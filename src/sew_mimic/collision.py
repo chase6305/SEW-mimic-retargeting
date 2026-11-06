@@ -155,32 +155,28 @@ def _capsule_distances_unchecked(
     cc = np.einsum("ij,ij->i", v, v)
     dd = np.einsum("ij,ij->i", u, w)
     ee = np.einsum("ij,ij->i", v, w)
-    s = np.zeros_like(aa)
-    t = np.zeros_like(aa)
-
     a_valid = aa > EPS
     b_valid = cc > EPS
-    only_b = ~a_valid & b_valid
-    only_a = a_valid & ~b_valid
-    both = a_valid & b_valid
-    t[only_b] = np.clip(ee[only_b] / cc[only_b], 0.0, 1.0)
-    s[only_a] = np.clip(-dd[only_a] / aa[only_a], 0.0, 1.0)
-
     denominator = aa * cc - bb * bb
-    nonparallel = both & (denominator > EPS)
-    s[nonparallel] = np.clip(
-        (bb[nonparallel] * ee[nonparallel] - cc[nonparallel] * dd[nonparallel])
-        / denominator[nonparallel],
-        0.0,
-        1.0,
+    s = np.zeros_like(aa)
+    np.divide(
+        bb * ee - cc * dd,
+        denominator,
+        out=s,
+        where=a_valid & b_valid & (denominator > EPS),
     )
-    t[both] = (bb[both] * s[both] + ee[both]) / cc[both]
-    below = both & (t < 0.0)
-    above = both & (t > 1.0)
-    t[below] = 0.0
-    s[below] = np.clip(-dd[below] / aa[below], 0.0, 1.0)
-    t[above] = 1.0
-    s[above] = np.clip((bb[above] - dd[above]) / aa[above], 0.0, 1.0)
+    np.clip(s, 0.0, 1.0, out=s)
+    t = np.zeros_like(aa)
+    np.divide(bb * s + ee, cc, out=t, where=b_valid)
+    # Reproject onto A when B is a point or its closest point is an endpoint.
+    np.divide(
+        np.where(t > 1.0, bb - dd, -dd),
+        aa,
+        out=s,
+        where=a_valid & (~b_valid | (t < 0.0) | (t > 1.0)),
+    )
+    np.clip(s, 0.0, 1.0, out=s)
+    np.clip(t, 0.0, 1.0, out=t)
 
     delta = (starts_b + t[:, None] * v) - (starts_a + s[:, None] * u)
     return np.sqrt(np.einsum("ij,ij->i", delta, delta)) - radii_a - radii_b

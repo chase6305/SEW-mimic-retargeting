@@ -13,7 +13,6 @@ from sew_mimic import (
     Serial7DoF,
     alignment_diagnostics,
     configure_logging,
-    solve,
     solve_batch,
 )
 from sew_mimic.robots import (
@@ -24,41 +23,6 @@ from sew_mimic.robots import (
     load_robot_arm,
     resolve_robot_urdf,
 )
-
-
-def rotation_to_wxyz(R: np.ndarray) -> tuple[float, float, float, float]:
-    """Convert a rotation matrix to the normalized quaternion format viser uses."""
-    R = np.asarray(R, dtype=np.float64)
-    w = np.sqrt(max(0.0, 1.0 + np.trace(R))) / 2.0
-    x = np.copysign(np.sqrt(max(0.0, 1.0 + R[0, 0] - R[1, 1] - R[2, 2])) / 2.0, R[2, 1] - R[1, 2])
-    y = np.copysign(np.sqrt(max(0.0, 1.0 - R[0, 0] + R[1, 1] - R[2, 2])) / 2.0, R[0, 2] - R[2, 0])
-    z = np.copysign(np.sqrt(max(0.0, 1.0 - R[0, 0] - R[1, 1] + R[2, 2])) / 2.0, R[1, 0] - R[0, 1])
-    q = np.array([w, x, y, z])
-    q /= np.linalg.norm(q)
-    return tuple(float(value) for value in q)
-
-
-def minimum_jerk_trajectory(
-    q_start: np.ndarray,
-    q_goal: np.ndarray,
-    duration: float,
-    fps: float,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Plan a synchronized joint trajectory with zero endpoint velocity/acceleration."""
-    if duration <= 0.0:
-        raise ValueError("duration must be positive")
-    if fps <= 0.0:
-        raise ValueError("fps must be positive")
-    q_start = np.asarray(q_start, dtype=np.float64)
-    q_goal = np.asarray(q_goal, dtype=np.float64)
-    if q_start.shape != q_goal.shape:
-        raise ValueError("q_start and q_goal must have the same shape")
-
-    times = np.linspace(0.0, duration, max(2, int(np.ceil(duration * fps)) + 1))
-    tau = times / duration
-    blend = 10.0 * tau**3 - 15.0 * tau**4 + 6.0 * tau**5
-    trajectory = q_start[None, :] + blend[:, None] * (q_goal - q_start)[None, :]
-    return times, trajectory
 
 
 def periodic_waypoint_trajectory(
@@ -326,38 +290,13 @@ def retarget_reference_trajectory(
         wrists[index] = elbows[index] + 0.314 * robot.axis_world(q_reference, 5)
         hands[index] = robot.tool_orientation(q_reference)
 
-    if backend == "cpp":
-        solve_start = time.perf_counter()
-        solved_array = solve_batch(
-            robot,
-            np.zeros(7),
-            shoulders,
-            elbows,
-            wrists,
-            hands,
-            backend="cpp",
-        )
+    solve_start = time.perf_counter()
+    solved_array = solve_batch(
+        robot, np.zeros(7), shoulders, elbows, wrists, hands, backend=backend
+    )
+    if solve_timings is not None:
         elapsed_per_frame = (time.perf_counter() - solve_start) / len(reference)
-        if solve_timings is not None:
-            solve_timings.extend([elapsed_per_frame] * len(reference))
-    else:
-        solved = []
-        q_previous = np.zeros(7)
-        for shoulder, elbow, wrist, hand in zip(shoulders, elbows, wrists, hands):
-            solve_start = time.perf_counter()
-            q_previous = solve(
-                robot,
-                q_previous,
-                shoulder,
-                elbow,
-                wrist,
-                hand,
-                backend=backend,
-            )
-            if solve_timings is not None:
-                solve_timings.append(time.perf_counter() - solve_start)
-            solved.append(q_previous.copy())
-        solved_array = np.asarray(solved)
+        solve_timings.extend([elapsed_per_frame] * len(reference))
 
     max_error = 0.0
     for q_solution, shoulder, elbow, wrist, hand in zip(
@@ -458,6 +397,7 @@ def main() -> None:
     try:
         import viser
         from viser.extras import ViserUrdf
+        from viser.transforms import SO3
     except ImportError as exc:
         raise SystemExit(
             "Install visualization dependencies with: pip install -e '.[visualization]'"
@@ -539,7 +479,7 @@ def main() -> None:
             for link_name, handle in coordinate_frames[side]:
                 T = transforms[link_name]
                 handle.position = tuple(float(value) for value in T[:3, 3])
-                handle.wxyz = rotation_to_wxyz(T[:3, :3])
+                handle.wxyz = SO3.from_matrix(T[:3, :3]).wxyz
         return transforms
 
     def update_target_skeletons(index: int, transforms: dict[str, np.ndarray]) -> None:
