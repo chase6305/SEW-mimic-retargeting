@@ -284,14 +284,9 @@ def sp2(
     theta2, ls2 = sp4(k1, p2_n, k2, float(np.dot(k1, p1_n)))
 
     # IK-Geo pairs the two circle intersections in opposite order.
+    solutions = [(float(theta1[0]), float(theta2[-1]))]
     if len(theta1) > 1 or len(theta2) > 1:
-        t1 = np.array([theta1[0], theta1[-1]], dtype=np.float64)
-        t2 = np.array([theta2[-1], theta2[0]], dtype=np.float64)
-    else:
-        t1 = theta1
-        t2 = theta2
-
-    solutions = [(float(a), float(b)) for a, b in zip(t1, t2)]
+        solutions.append((float(theta1[-1]), float(theta2[0])))
     is_ls = abs(float(np.linalg.norm(p1)) - float(np.linalg.norm(p2))) > 1e-8 or ls1 or ls2
     return solutions, is_ls
 
@@ -363,28 +358,30 @@ def align_axis(
         qa_vals = equivalent_angles_in_limits(
             qa_raw, robot.q_min[idx_a], robot.q_max[idx_a], q0[idx_a]
         )
+        if not qa_vals:
+            continue
         qb_vals = equivalent_angles_in_limits(
             qb_raw, robot.q_min[idx_b], robot.q_max[idx_b], q0[idx_b]
         )
-        for qa in qa_vals:
-            for qb in qb_vals:
-                cost = abs(q0[idx_a] - qa) + abs(q0[idx_b] - qb)
-                candidates.append((cost, qa, qb))
+        if qb_vals:
+            # The L1 cost separates by joint; each list is already nearest-first.
+            qa, qb = qa_vals[0], qb_vals[0]
+            candidates.append((abs(q0[idx_a] - qa) + abs(q0[idx_b] - qb), qa, qb))
 
     if not candidates:
         raise JointLimitError(
             f"AlignAxis(i={joint_number_i}) found analytical solutions, but none obey joint limits"
         )
 
-    candidates.sort(key=lambda x: x[0])
+    _, qa, qb = min(candidates, key=lambda candidate: candidate[0])
     logger.debug(
         "AlignAxis completed: target_joint=%d candidates=%d q=(%.6f, %.6f)",
         joint_number_i,
         len(candidates),
-        candidates[0][1],
-        candidates[0][2],
+        qa,
+        qb,
     )
-    return candidates[0][1], candidates[0][2]
+    return qa, qb
 
 
 def align_wrist_parallel(

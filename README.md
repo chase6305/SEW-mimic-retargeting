@@ -3,7 +3,7 @@
 [![CI](https://github.com/chase6305/SEW-mimic-retargeting/actions/workflows/ci.yml/badge.svg)](https://github.com/chase6305/SEW-mimic-retargeting/actions/workflows/ci.yml)
 
 Closed-form seven-DoF arm retargeting in Python and optional C++, based on
-*A Closed-Form Geometric Retargeting Solver for Upper Body Humanoid Robot Teleoperation*.
+[*A Closed-Form Geometric Retargeting Solver for Upper Body Humanoid Robot Teleoperation*](https://doi.org/10.48550/arXiv.2602.01632).
 Matches upper-arm/forearm directions and hand orientation. Includes Marvin M6 and OpenArm
 assets, interactive demos, and a capsule/XPBD bimanual self-collision filter.
 
@@ -45,19 +45,22 @@ from sew_mimic import solve
 from sew_mimic.robots import load_robot_arm
 
 arm = load_robot_arm("marvin", side="left")
+q_reference = np.array([0.35, -0.45, 0.40, -0.75, 0.30, 0.25, -0.20])
+shoulder = np.zeros(3)
+elbow = 0.287 * arm.robot.axis_world(q_reference, 3)
+wrist = elbow + 0.314 * arm.robot.axis_world(q_reference, 5)
 q_command = solve(
     arm.robot,
-    np.zeros(7),                    # current joints, radians
-    np.array([0.0, 0.0, 0.0]),     # shoulder
-    np.array([0.20, 0.20, 0.05]),   # elbow
-    np.array([0.45, 0.25, 0.10]),   # wrist
-    np.eye(3),                     # hand orientation, SO(3)
+    np.zeros(7),  # current joints, radians
+    shoulder, elbow, wrist,
+    arm.robot.tool_orientation(q_reference),
     backend="python",
 )
 ```
 
 All positions and the hand rotation must use the same arm-base frame (`left_arm_base` for this
 Marvin arm); positions use metres and joints use radians. Limb vectors must be nonzero.
+This example generates a reachable target with FK; replace it with calibrated tracking inputs.
 The objective matches directions and orientation rather than absolute tool position.
 
 Build the optional native backend, then select `backend="cpp"` or pass `--backend cpp` to a demo:
