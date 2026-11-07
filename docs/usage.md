@@ -27,6 +27,36 @@ wrist_arm = R_arm_world @ (wrist_world - p_world_arm)
 hand_orientation_arm = R_arm_world @ hand_orientation_world
 ```
 
+## Wrist orientation
+
+`align_wrist_orientation()` solves J5–J7 while holding J1–J4 fixed.
+`align_wrist_parallel` remains an alias for compatibility. Both Python and C++
+use the same geometric construction:
+
+```text
+T(q) = R07(q) @ R_7T_local @ R_align
+R07_des = H @ R_align.T @ R_7T_local.T
+```
+
+The solver aligns `R07_des @ axes_local[6]`, then recovers the remaining
+rotation about J7. Aligning J7 and the independent J6 direction determines
+the complete rotation. Thus the tracked tool's X axis need not coincide with J7.
+Consecutive joint-axis orthogonality, valid calibration, and joint limits still
+apply; this is not support for arbitrary seven-axis geometries. Near singular
+configurations, numerical thresholds and branch selection affect the result.
+
+In the bundled URDFs, using the configured tool frame and default `R_align`,
+the absolute dot product between the tool X direction and J7 is approximately
+1 for Marvin's `*_ee` and 0 for OpenArm's `*_hand_base`, on both sides.
+These describe the selected coordinate frames, not a classification of every
+hardware variant or a conclusion drawn from the joint names.
+
+This implementation generalizes Algorithm 3's axis alignment. It does not
+implement the separate Euler decomposition in
+[Appendix C of the paper](https://arxiv.org/html/2602.01632v1#A3).
+Joint-limit filtering selects among the analytical branches considered by the
+solver; it is not an exhaustive search over all arm configurations.
+
 ## Backends and batches
 
 `solve(..., backend="python"|"cpp")` selects the implementation explicitly.

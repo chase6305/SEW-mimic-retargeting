@@ -1,4 +1,4 @@
-// Native C++17 implementation of the SEW-Mimic parallel-wrist solver.
+// Native C++17 SEW-Mimic solver using the actual final joint axis for wrist orientation.
 
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>

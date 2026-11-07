@@ -1,20 +1,19 @@
 """SEW-Mimic core retargeting solver (paper reproduction).
 
-Implements the core single-arm, parallel-wrist path from:
+Implements the core single-arm geometric path from:
 "A Closed-Form Geometric Retargeting Solver for Upper Body Humanoid Robot Teleoperation".
 
 Included:
 - Rodrigues rotations
 - IK-Geo canonical Subproblems 1, 2, and 4
 - Algorithm 2: AlignAxis
-- Algorithm 3: parallel-wrist AlignWrist
+- Algorithm 3: AlignWrist generalized to the actual final joint axis
 - Algorithm 1: SEW-Mimic
 - Algorithm 8 helper: MakeFrame
 
 Not included:
 - XPBD/capsule safety filter (Algorithms 4, 9-12)
-- perpendicular-wrist Euler decomposition (Appendix C), because it requires
-  robot-specific Euler-axis ordering and frame conventions.
+- the separate Euler-decomposition implementation from Appendix C.
 
 The solver assumes a 7-DoF serial revolute chain with consecutive joint axes
 perpendicular in the sense required by the paper.
@@ -384,21 +383,24 @@ def align_axis(
     return qa, qb
 
 
-def align_wrist_parallel(
+def align_wrist_orientation(
     robot: Serial7DoF,
     q0: Sequence[float],
     H: np.ndarray,
 ) -> np.ndarray:
-    """Paper Algorithm 3 for the parallel-wrist case.
+    """Recover wrist orientation using the actual final joint axis.
 
     H is the desired human hand orientation in the robot/body-centric base frame.
     Returns [q5, q6, q7].
 
     The PDF uses R_des[:,1] in 1-based notation to align h7. Here we use the
     coordinate-free equivalent R_des @ h7, which reduces to the first column
-    when h7 is the local +X axis and also supports other local h7 conventions.
+    when h7 is the local +X axis. Fixed tool mounting and hand alignment are
+    removed before solving; the tracked tool X axis need not be parallel to h7.
+    The model must satisfy the solver's consecutive-orthogonal-axis assumptions.
+    This is a geometric generalization, not Appendix C's Euler decomposition.
     """
-    logger.debug("Parallel wrist alignment started")
+    logger.debug("Wrist orientation alignment started")
     q = np.asarray(q0, dtype=np.float64).reshape(-1).copy()
     H = np.asarray(H, dtype=np.float64)
     if q.shape != (7,):
@@ -425,8 +427,12 @@ def align_wrist_parallel(
     q7 = _bound_angle(q7_raw, robot, 6, q0[6])
 
     result = np.array([q5, q6, q7], dtype=np.float64)
-    logger.debug("Parallel wrist alignment completed: q=%s", result)
+    logger.debug("Wrist orientation alignment completed: q=%s", result)
     return result
+
+
+# Backward-compatible name; both entry points use the same implementation.
+align_wrist_parallel = align_wrist_orientation
 
 
 def sew_mimic(
@@ -461,7 +467,7 @@ def sew_mimic(
 
     q[0:2] = align_axis(robot, 3, q, upper_direction)
     q[2:4] = align_axis(robot, 5, q, lower_direction)
-    q[4:7] = align_wrist_parallel(robot, q, H)
+    q[4:7] = align_wrist_orientation(robot, q, H)
     logger.debug("SEW-Mimic solve completed: q=%s", q)
     return q
 

@@ -82,7 +82,8 @@ extension and fails if it is unavailable. Robot URDFs and meshes are bundled in 
 - [Performance measurements](docs/performance-2026-09-05.md): measured scope and reproduction commands.
 - [Development](docs/development.md): checks, packaging, and paper reproduction notes.
 
-The solver currently supports the paper's parallel-wrist path. The collision filter uses approximate
+Wrist orientation uses the actual final joint axis and fixed tool transform; see
+[wrist conventions](docs/usage.md#wrist-orientation). The collision filter uses approximate
 self-collision capsules and heuristic XPBD; it has no formal collision-avoidance guarantee and does
 not model environment obstacles. Hardware engagement, command limits, and emergency stops belong
 to the application.
