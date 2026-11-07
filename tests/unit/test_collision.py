@@ -42,7 +42,8 @@ def test_capsule_signed_distance_and_contact_points():
     assert colliding.colliding
 
 
-def test_vectorized_capsule_distances_match_scalar_kernel():
+@pytest.mark.parametrize("scale", [1e-5, 0.01, 1.0, 1e3])
+def test_vectorized_capsule_distances_match_scalar_kernel(scale):
     rng = np.random.default_rng(4)
     starts_a = rng.normal(size=(100, 3))
     ends_a = starts_a + rng.normal(size=(100, 3))
@@ -50,7 +51,14 @@ def test_vectorized_capsule_distances_match_scalar_kernel():
     ends_b = starts_b + rng.normal(size=(100, 3))
     radii_a = rng.uniform(0.01, 0.2, size=100)
     radii_b = rng.uniform(0.01, 0.2, size=100)
-    batched = _capsule_distances_unchecked(starts_a, ends_a, starts_b, ends_b, radii_a, radii_b)
+    ends_a[::5] = starts_a[::5]
+    ends_b[::7] = starts_b[::7]
+    ends_b[1::5] = starts_b[1::5] + ends_a[1::5] - starts_a[1::5]
+    starts_a, ends_a, starts_b, ends_b, radii_a, radii_b = (
+        value * scale for value in (starts_a, ends_a, starts_b, ends_b, radii_a, radii_b)
+    )
+    with np.errstate(all="raise"):
+        batched = _capsule_distances_unchecked(starts_a, ends_a, starts_b, ends_b, radii_a, radii_b)
     scalar = np.array(
         [
             capsule_contact(Capsule(a0, a1, ra), Capsule(b0, b1, rb)).distance

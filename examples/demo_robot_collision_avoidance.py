@@ -161,10 +161,10 @@ def main() -> None:
             "Time [s]", min=0.0, max=args.duration, step=1.0 / args.fps, initial_value=0.0
         )
         target_metric = server.gui.add_number(
-            "Unsafe target distance [m]", initial_value=0.0, disabled=True
+            "Unsafe target distance [m]", initial_value=0.0, step=0.0001, disabled=True
         )
         command_metric = server.gui.add_number(
-            "Safe command distance [m]", initial_value=0.0, disabled=True
+            "Safe command distance [m]", initial_value=0.0, step=0.0001, disabled=True
         )
         state = server.gui.add_text("Filter state", initial_value="SAFE", disabled=True)
         server.gui.add_markdown(

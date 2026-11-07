@@ -3,7 +3,7 @@ import math
 import numpy as np
 import pytest
 
-from sew_mimic import Serial7DoF, rot, sew_mimic, sp1, sp2, sp4
+from sew_mimic import Serial7DoF, align_axis, rot, sew_mimic, sp1, sp2, sp4
 
 
 def build_robot():
@@ -39,6 +39,24 @@ def test_sp4_exact_solution():
         abs(np.array([0, 1, 0]) @ (rot([0, 0, 1], t) @ np.array([1, 0, 0])) - 1.0) for t in sols
     ]
     assert min(residuals) < 1e-10
+
+
+@pytest.mark.parametrize(
+    "p1,p2,count,is_ls,residual",
+    [
+        ([1, 0, 0], [1, 0, 0], 2, False, 0.0),
+        ([0, 0, 1], [1, 0, 0], 1, False, 0.0),
+        ([0, 0, 1], [0, 1, 0], 1, True, np.sqrt(2.0)),
+        ([2, 0, 0], [1, 0, 0], 2, True, 1.0),
+    ],
+)
+def test_sp2_preserves_single_paired_and_least_squares_solutions(p1, p2, count, is_ls, residual):
+    solutions, actual_ls = sp2(p1, p2, [0, 0, 1], [0, 1, 0])
+    assert len(solutions) == count
+    assert actual_ls == is_ls
+    for first, second in solutions:
+        actual = np.linalg.norm(rot([0, 0, 1], first) @ p1 - rot([0, 1, 0], second) @ p2)
+        assert actual == pytest.approx(residual, abs=1e-12)
 
 
 def test_sp2_random_exact_cases():
@@ -83,6 +101,17 @@ def test_end_to_end_fk_to_sew_to_solver():
         assert np.linalg.norm(robot.axis_world(q, 3) - upper_direction) < 1e-8
         assert np.linalg.norm(robot.axis_world(q, 5) - lower_direction) < 1e-8
         assert np.linalg.norm(robot.tool_orientation(q) - H, ord="fro") < 1e-8
+
+
+def test_axis_alignment_selects_nearest_multi_turn_equivalents():
+    robot = build_robot()
+    robot.q_min[:] = -20.0 * np.pi
+    robot.q_max[:] = 20.0 * np.pi
+    expected = np.array([0.3 + 12.0 * np.pi, 0.4 - 10.0 * np.pi, 0, 0, 0, 0, 0])
+    target = robot.axis_world(expected, 3)
+    current = expected.copy()
+    current[:2] += 0.01
+    assert align_axis(robot, 3, current, target) == pytest.approx(expected[:2], abs=1e-12)
 
 
 def test_relative_rotations_and_world_axes_match_full_fk_with_fixed_transforms():

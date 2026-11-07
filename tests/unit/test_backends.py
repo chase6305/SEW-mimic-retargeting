@@ -60,6 +60,30 @@ def test_explicit_python_backend_matches_reference():
     assert np.allclose(result, direct)
 
 
+@pytest.mark.parametrize("backend", ["python", "cpp"])
+def test_solver_selects_nearby_equivalents_for_multi_turn_joint_limits(backend):
+    if backend == "cpp" and not cpp_backend_available():
+        pytest.skip("native extension is not built")
+    robot = make_robot()
+    robot.q_min[:] = -20.0 * np.pi
+    robot.q_max[:] = 20.0 * np.pi
+    target = np.array([0.3, 0.4, -0.2, 0.7, 0.1, -0.5, 0.2])
+    target += 2.0 * np.pi * np.array([6, -5, 4, -3, 2, -1, 1])
+    shoulder = np.zeros(3)
+    elbow = 0.287 * robot.axis_world(target, 3)
+    wrist = elbow + 0.314 * robot.axis_world(target, 5)
+    result = solve(
+        robot,
+        target + 0.01,
+        shoulder,
+        elbow,
+        wrist,
+        robot.tool_orientation(target),
+        backend=backend,
+    )
+    np.testing.assert_allclose(result, target, rtol=0, atol=1e-12)
+
+
 def test_empty_python_batch_preserves_documented_output_shape():
     robot = make_robot()
     result = solve_batch(

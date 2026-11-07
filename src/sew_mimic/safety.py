@@ -235,14 +235,6 @@ _CAPSULE_START_POINT_INDICES.flags.writeable = False
 _CAPSULE_END_POINT_INDICES.flags.writeable = False
 
 
-def _update_moving_capsule_endpoints(
-    points: np.ndarray, starts: np.ndarray, ends: np.ndarray
-) -> None:
-    """Refresh moving capsule endpoints in preallocated geometry arrays."""
-    starts[1:] = points[_CAPSULE_START_POINT_INDICES]
-    ends[1:] = points[_CAPSULE_END_POINT_INDICES]
-
-
 def _capsule_arrays(
     points: np.ndarray, config: SafetyFilterConfig
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -251,7 +243,8 @@ def _capsule_arrays(
     ends = np.empty((7, 3), dtype=np.float64)
     starts[0] = config.torso_start
     ends[0] = config.torso_end
-    _update_moving_capsule_endpoints(points, starts, ends)
+    starts[1:] = points[_CAPSULE_START_POINT_INDICES]
+    ends[1:] = points[_CAPSULE_END_POINT_INDICES]
     return starts, ends, config.capsule_radii
 
 
@@ -347,12 +340,10 @@ def find_first_collision(
     ratios = np.linalg.norm(displacement, axis=1) / config.interpolation_point_radii
     samples = int(np.clip(np.ceil(np.max(ratios)), 1, config.interpolation_limit))
     logger.debug("Continuous collision check sampling: samples=%d", samples)
-    last = desired
     inverse_samples = 1.0 / samples
     for sample_index in range(1, samples + 1):
         fraction = sample_index * inverse_samples
         candidate = initial + fraction * displacement
-        last = candidate
         distance = minimum_capsule_distance(candidate, config, backend=backend)
         if distance < config.activation_distance:
             logger.debug(
@@ -365,10 +356,8 @@ def find_first_collision(
             break
     else:
         logger.debug("Continuous collision check completed without activation")
-    # ``last`` is always a freshly allocated interpolation candidate because
-    # ``samples`` is clamped to at least one; returning it directly preserves
-    # ownership without one more (8, 3) copy.
-    return last
+    # At least one sample runs, so this is an owned interpolation result.
+    return candidate
 
 
 def _project_lengths(points: np.ndarray, lengths: np.ndarray, compliance: float) -> None:
@@ -399,7 +388,10 @@ def _xpbd_iteration(
     lengths: np.ndarray,
 ) -> None:
     """One capsule constraint pass following paper Algorithm 10."""
-    starts, ends, radii = _capsule_arrays(points, config)
+    # Views follow in-place corrections without copying endpoints after each constraint.
+    starts = (config.torso_start, *(points[index] for index in _CAPSULE_START_POINT_INDICES))
+    ends = (config.torso_end, *(points[index] for index in _CAPSULE_END_POINT_INDICES))
+    radii = config.capsule_radii
     active_constraints = 0
     assert config.collision_pairs is not None
     for pair_index, (first, second) in enumerate(config.collision_pairs):
@@ -429,8 +421,8 @@ def _xpbd_iteration(
             if capsule_index == 0:  # torso is fixed
                 continue
             _, start, end, _ = _MOVING_CAPSULES[capsule_index - 1]
-            gradients[start] = gradients.get(start, np.zeros(3)) + sign * (1.0 - parameter) * normal
-            gradients[end] = gradients.get(end, np.zeros(3)) + sign * parameter * normal
+            gradients[start] = gradients.get(start, 0.0) + sign * (1.0 - parameter) * normal
+            gradients[end] = gradients.get(end, 0.0) + sign * parameter * normal
 
         denominator = config.compliance
         for point_index, gradient in gradients.items():
@@ -443,8 +435,6 @@ def _xpbd_iteration(
         for point_index, gradient in gradients.items():
             if point_index not in (0, 4):
                 points[point_index] += (new - old) * gradient
-        _update_moving_capsule_endpoints(points, starts, ends)
-
     _project_lengths(points, lengths, config.compliance)
     logger.debug("XPBD constraint pass completed: active_constraints=%d", active_constraints)
 
@@ -555,22 +545,25 @@ def sew_safety_filter(
                 minimum_distance,
             )
 
+    def hold_current(status: SafetyFilterStatus, distance: float) -> SafetyFilterResult:
+        return SafetyFilterResult(
+            np.asarray(q_left_current).copy(),
+            np.asarray(q_right_current).copy(),
+            False,
+            used_iterations,
+            distance,
+            status,
+            desired_minimum,
+            minimum_capsule_distance(current_points, config, backend=backend),
+        )
+
     if minimum_distance < config.minimum_distance - config.tolerance:
         logger.warning(
             "SEW safety filter failed to clear collision after %d iterations: distance=%.6f m; returning current pose",
             used_iterations,
             minimum_distance,
         )
-        return SafetyFilterResult(
-            np.asarray(q_left_current).copy(),
-            np.asarray(q_right_current).copy(),
-            False,
-            used_iterations,
-            minimum_distance,
-            SafetyFilterStatus.XPBD_FAILED,
-            desired_minimum,
-            minimum_capsule_distance(current_points, config, backend=backend),
-        )
+        return hold_current(SafetyFilterStatus.XPBD_FAILED, minimum_distance)
 
     logger.debug("Safety stage 4/6: recovering tool orientations")
     left_orientation = recover_tool_orientation(
@@ -588,16 +581,7 @@ def sew_safety_filter(
     except SEWMimicError as error:
         logger.warning("Adjusted SEW solve failed (%s); returning current pose", error)
         logger.debug("Adjusted SEW solve traceback", exc_info=True)
-        return SafetyFilterResult(
-            np.asarray(q_left_current).copy(),
-            np.asarray(q_right_current).copy(),
-            False,
-            used_iterations,
-            minimum_distance,
-            SafetyFilterStatus.IK_FAILED,
-            desired_minimum,
-            minimum_capsule_distance(current_points, config, backend=backend),
-        )
+        return hold_current(SafetyFilterStatus.IK_FAILED, minimum_distance)
     logger.debug("Safety stage 6/6: validating reconstructed robot pose")
     reconstructed = forward_kinematics(q_left, q_right)
     reconstructed_distance = minimum_capsule_distance(
@@ -608,16 +592,7 @@ def sew_safety_filter(
             "Reconstructed pose remains unsafe: distance=%.6f m; returning current pose",
             reconstructed_distance,
         )
-        return SafetyFilterResult(
-            np.asarray(q_left_current).copy(),
-            np.asarray(q_right_current).copy(),
-            False,
-            used_iterations,
-            reconstructed_distance,
-            SafetyFilterStatus.VALIDATION_FAILED,
-            desired_minimum,
-            minimum_capsule_distance(current_points, config, backend=backend),
-        )
+        return hold_current(SafetyFilterStatus.VALIDATION_FAILED, reconstructed_distance)
     logger.debug(
         "SEW safety filter completed: iterations=%d minimum_distance=%.6f m",
         used_iterations,

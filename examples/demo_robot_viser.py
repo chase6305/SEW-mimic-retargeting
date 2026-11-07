@@ -13,7 +13,6 @@ from sew_mimic import (
     Serial7DoF,
     alignment_diagnostics,
     configure_logging,
-    solve,
     solve_batch,
 )
 from sew_mimic.robots import (
@@ -24,41 +23,6 @@ from sew_mimic.robots import (
     load_robot_arm,
     resolve_robot_urdf,
 )
-
-
-def rotation_to_wxyz(R: np.ndarray) -> tuple[float, float, float, float]:
-    """Convert a rotation matrix to the normalized quaternion format viser uses."""
-    R = np.asarray(R, dtype=np.float64)
-    w = np.sqrt(max(0.0, 1.0 + np.trace(R))) / 2.0
-    x = np.copysign(np.sqrt(max(0.0, 1.0 + R[0, 0] - R[1, 1] - R[2, 2])) / 2.0, R[2, 1] - R[1, 2])
-    y = np.copysign(np.sqrt(max(0.0, 1.0 - R[0, 0] + R[1, 1] - R[2, 2])) / 2.0, R[0, 2] - R[2, 0])
-    z = np.copysign(np.sqrt(max(0.0, 1.0 - R[0, 0] - R[1, 1] + R[2, 2])) / 2.0, R[1, 0] - R[0, 1])
-    q = np.array([w, x, y, z])
-    q /= np.linalg.norm(q)
-    return tuple(float(value) for value in q)
-
-
-def minimum_jerk_trajectory(
-    q_start: np.ndarray,
-    q_goal: np.ndarray,
-    duration: float,
-    fps: float,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Plan a synchronized joint trajectory with zero endpoint velocity/acceleration."""
-    if duration <= 0.0:
-        raise ValueError("duration must be positive")
-    if fps <= 0.0:
-        raise ValueError("fps must be positive")
-    q_start = np.asarray(q_start, dtype=np.float64)
-    q_goal = np.asarray(q_goal, dtype=np.float64)
-    if q_start.shape != q_goal.shape:
-        raise ValueError("q_start and q_goal must have the same shape")
-
-    times = np.linspace(0.0, duration, max(2, int(np.ceil(duration * fps)) + 1))
-    tau = times / duration
-    blend = 10.0 * tau**3 - 15.0 * tau**4 + 6.0 * tau**5
-    trajectory = q_start[None, :] + blend[:, None] * (q_goal - q_start)[None, :]
-    return times, trajectory
 
 
 def periodic_waypoint_trajectory(
@@ -225,56 +189,35 @@ def openarm_reference_trajectory(
         raise ValueError("side must be 'left' or 'right'")
 
     if side == "left":
-        neutral = np.array([-1.26172, -0.92937, 1.19838, 1.33681, 1.57079, -0.46509, -0.52772])
-        chest_open = np.array([-1.24066, -1.22790, 1.24012, 0.75371, 1.57079, -0.46509, -0.52772])
-        chest_cross = np.array([-1.49687, -0.20808, 1.44850, 1.26534, 1.57079, -0.73129, -0.32459])
-        guard = np.array([-1.27456, -1.08608, 1.50561, 1.51821, 1.57079, -0.46509, -0.52772])
-        reach = np.array([-1.47036, -0.30722, 1.57079, 0.21797, 1.57079, -0.46509, -0.52772])
-        arm_up = np.array([-2.27412, -1.06364, 1.38618, 1.23989, 1.57079, -0.46509, -0.52772])
-        arm_down = np.array([-0.81102, -0.79007, 1.57079, 0.81933, 1.57079, -0.46509, -0.52772])
-        pull = np.array([-1.35464, -1.03884, 1.49253, 1.43208, 1.57079, -0.46509, -0.52772])
-        push = np.array([-1.46465, -0.43522, 1.57079, 0.29252, 1.57079, -0.46509, -0.52772])
-        distal_solutions = np.array(
+        poses = np.array(
             [
-                [0.0, 0.0, 0.0],
-                [-0.10254, -0.04179, -0.86499],
-                [-0.01287, 0.10761, 0.67405],
-                [-0.07669, 0.23206, 0.02105],
-                [-0.10942, 0.04685, -0.47737],
-                [-0.41451, -0.78539, 0.11273],
-                [-0.17273, 0.65388, -0.51222],
-                [-0.10832, 0.15639, -0.00712],
-                [-0.11602, 0.03164, -0.52919],
+                [-1.26172, -0.92937, 1.19838, 1.33681, 0.00000, 0.00000, 0.00000],
+                [-1.24066, -1.22790, 1.24012, 0.75371, -0.10254, -0.04179, -0.86499],
+                [-1.49687, -0.20808, 1.44850, 1.26534, -0.01287, 0.10761, 0.67405],
+                [-1.27456, -1.08608, 1.50561, 1.51821, -0.07669, 0.23206, 0.02105],
+                [-1.47036, -0.30722, 1.57079, 0.21797, -0.10942, 0.04685, -0.47737],
+                [-2.27412, -1.06364, 1.38618, 1.23989, -0.41451, -0.78539, 0.11273],
+                [-0.81102, -0.79007, 1.57079, 0.81933, -0.17273, 0.65388, -0.51222],
+                [-1.35464, -1.03884, 1.49253, 1.43208, -0.10832, 0.15639, -0.00712],
+                [-1.46465, -0.43522, 1.57079, 0.29252, -0.11602, 0.03164, -0.52919],
             ]
         )
     else:
-        neutral = np.array([0.90530, 0.80607, -1.00774, 1.32608, 1.57079, -0.43390, 0.72121])
-        chest_open = np.array([0.82241, 1.05278, -0.36818, 0.74904, 1.57079, -0.43390, 0.72121])
-        chest_cross = np.array([1.20158, 0.15643, -1.37080, 1.25447, 1.57079, -0.68932, 0.57426])
-        guard = np.array([0.79265, 0.98154, -0.85500, 1.51730, 1.57079, -0.43390, 0.72121])
-        reach = np.array([1.31775, 0.20603, -0.57904, 0.17137, 1.57079, -0.43390, 0.72121])
-        arm_up = np.array([1.86739, 0.94219, -0.75311, 1.24007, 1.57079, -0.43390, 0.72121])
-        arm_down = np.array([0.66111, 0.77253, -1.31202, 0.81127, 1.57079, -0.43390, 0.72121])
-        pull = np.array([0.90711, 0.93346, -0.85986, 1.43132, 1.57079, -0.43390, 0.72121])
-        push = np.array([1.28141, 0.33548, -0.64148, 0.26140, 1.57079, -0.43390, 0.72121])
-        distal_solutions = np.array(
+        poses = np.array(
             [
-                [0.0, 0.0, 0.0],
-                [-0.38473, 0.46028, 0.87182],
-                [0.00082, -0.20455, -0.62950],
-                [0.03810, 0.07049, -0.00967],
-                [-0.60210, 0.16038, 0.49278],
-                [0.64411, 0.78539, -0.61779],
-                [0.22859, -0.45664, 0.60742],
-                [0.04756, 0.16078, -0.00703],
-                [-0.52217, 0.21142, 0.54109],
+                [0.90530, 0.80607, -1.00774, 1.32608, 0.00000, 0.00000, 0.00000],
+                [0.82241, 1.05278, -0.36818, 0.74904, -0.38473, 0.46028, 0.87182],
+                [1.20158, 0.15643, -1.37080, 1.25447, 0.00082, -0.20455, -0.62950],
+                [0.79265, 0.98154, -0.85500, 1.51730, 0.03810, 0.07049, -0.00967],
+                [1.31775, 0.20603, -0.57904, 0.17137, -0.60210, 0.16038, 0.49278],
+                [1.86739, 0.94219, -0.75311, 1.24007, 0.64411, 0.78539, -0.61779],
+                [0.66111, 0.77253, -1.31202, 0.81127, 0.22859, -0.45664, 0.60742],
+                [0.90711, 0.93346, -0.85986, 1.43132, 0.04756, 0.16078, -0.00703],
+                [1.28141, 0.33548, -0.64148, 0.26140, -0.52217, 0.21142, 0.54109],
             ]
         )
-
-    named_poses = [neutral, chest_open, chest_cross, guard, reach, arm_up, arm_down, pull, push]
-    for pose, distal in zip(named_poses, distal_solutions):
-        pose[2] = np.clip(pose[2], -1.45, 1.45)
-        pose[4:] = distal
+    poses[:, 2] = np.clip(poses[:, 2], -1.45, 1.45)
+    neutral, chest_open, chest_cross, guard, reach, arm_up, arm_down, pull, push = poses
 
     # Each paired arm receives the complementary waypoint at the same index.
     # This produces chest opening/crossing, opposing vertical swings,
@@ -326,38 +269,13 @@ def retarget_reference_trajectory(
         wrists[index] = elbows[index] + 0.314 * robot.axis_world(q_reference, 5)
         hands[index] = robot.tool_orientation(q_reference)
 
-    if backend == "cpp":
-        solve_start = time.perf_counter()
-        solved_array = solve_batch(
-            robot,
-            np.zeros(7),
-            shoulders,
-            elbows,
-            wrists,
-            hands,
-            backend="cpp",
-        )
+    solve_start = time.perf_counter()
+    solved_array = solve_batch(
+        robot, np.zeros(7), shoulders, elbows, wrists, hands, backend=backend
+    )
+    if solve_timings is not None:
         elapsed_per_frame = (time.perf_counter() - solve_start) / len(reference)
-        if solve_timings is not None:
-            solve_timings.extend([elapsed_per_frame] * len(reference))
-    else:
-        solved = []
-        q_previous = np.zeros(7)
-        for shoulder, elbow, wrist, hand in zip(shoulders, elbows, wrists, hands):
-            solve_start = time.perf_counter()
-            q_previous = solve(
-                robot,
-                q_previous,
-                shoulder,
-                elbow,
-                wrist,
-                hand,
-                backend=backend,
-            )
-            if solve_timings is not None:
-                solve_timings.append(time.perf_counter() - solve_start)
-            solved.append(q_previous.copy())
-        solved_array = np.asarray(solved)
+        solve_timings.extend([elapsed_per_frame] * len(reference))
 
     max_error = 0.0
     for q_solution, shoulder, elbow, wrist, hand in zip(
@@ -458,6 +376,7 @@ def main() -> None:
     try:
         import viser
         from viser.extras import ViserUrdf
+        from viser.transforms import SO3
     except ImportError as exc:
         raise SystemExit(
             "Install visualization dependencies with: pip install -e '.[visualization]'"
@@ -539,7 +458,7 @@ def main() -> None:
             for link_name, handle in coordinate_frames[side]:
                 T = transforms[link_name]
                 handle.position = tuple(float(value) for value in T[:3, 3])
-                handle.wxyz = rotation_to_wxyz(T[:3, :3])
+                handle.wxyz = SO3.from_matrix(T[:3, :3]).wxyz
         return transforms
 
     def update_target_skeletons(index: int, transforms: dict[str, np.ndarray]) -> None:
@@ -567,6 +486,11 @@ def main() -> None:
         transforms = update_robot_from_sliders()
         update_target_skeletons(index, transforms)
 
+    def on_joint_update(event) -> None:
+        # Playback refreshes FK once after updating the complete slider set.
+        if event.client is not None:
+            update_robot_from_sliders()
+
     for side, arm in arms.items():
         sliders[side] = []
         with server.gui.add_folder(f"{side.title()} arm joints"):
@@ -583,7 +507,7 @@ def main() -> None:
                     step=1e-3,
                     initial_value=float(value),
                 )
-                slider.on_update(lambda _: update_robot_from_sliders())
+                slider.on_update(on_joint_update)
                 sliders[side].append(slider)
 
     # Draw the arm base and each moving joint frame with compact axes. The EE
