@@ -10,6 +10,7 @@ from sew_mimic import (
     CapsuleRadii,
     SafetyFilterConfig,
     SafetyFilterStatus,
+    SEWMimicError,
     cpp_backend_available,
     find_first_collision,
     minimum_capsule_distance,
@@ -91,6 +92,56 @@ def test_safety_filter_resolves_cross_arm_collision():
     assert result.safe
     assert result.minimum_distance >= config.minimum_distance - config.tolerance
     assert result.status is SafetyFilterStatus.CORRECTED
+
+
+@pytest.mark.parametrize("backend", ["python", "cpp"])
+@pytest.mark.parametrize(
+    "status",
+    [
+        SafetyFilterStatus.XPBD_FAILED,
+        SafetyFilterStatus.IK_FAILED,
+        SafetyFilterStatus.VALIDATION_FAILED,
+    ],
+)
+def test_failure_returns_owned_current_commands_and_clearance(status, backend):
+    if backend == "cpp" and not cpp_backend_available():
+        pytest.skip("native extension is not built")
+    current_left = np.zeros(7)
+    current_right = np.full(7, -0.1)
+    config = _config()
+    if status is SafetyFilterStatus.XPBD_FAILED:
+        config = replace(config, compliance=1e12, iterations=1)
+
+    def fk(left, right):
+        return _pose(0.0 if left[0] > 0.5 else 0.3)
+
+    def solve(current, pose):
+        if status is SafetyFilterStatus.IK_FAILED:
+            raise SEWMimicError("No solution for the corrected pose")
+        return np.ones(7)
+
+    result = sew_safety_filter(
+        current_left,
+        current_right,
+        np.ones(7),
+        np.ones(7),
+        forward_kinematics=fk,
+        solve_left=solve,
+        solve_right=solve,
+        config=config,
+        backend=backend,
+    )
+    assert not result.safe
+    assert result.status is status
+    for command, current in ((result.q_left, current_left), (result.q_right, current_right)):
+        np.testing.assert_array_equal(command, current)
+        assert not np.shares_memory(command, current)
+    assert result.desired_minimum_distance == pytest.approx(
+        minimum_capsule_distance(_pose(0.0).points(), config, backend=backend)
+    )
+    assert result.command_minimum_distance == pytest.approx(
+        minimum_capsule_distance(_pose(0.3).points(), config, backend=backend)
+    )
 
 
 def test_recover_tool_orientation_aligns_x_axis():
@@ -226,8 +277,12 @@ def test_cpp_sampling_clamps_large_displacements_before_integer_conversion():
 
 
 @pytest.mark.skipif(not cpp_backend_available(), reason="native extension is not built")
-def test_cpp_xpbd_projection_matches_python_reference():
-    config = _config()
+@pytest.mark.parametrize(
+    "pairs,iterations",
+    [(None, 100), (tuple((i, j) for i in range(7) for j in range(i + 1, 7)), 1)],
+)
+def test_cpp_xpbd_projection_matches_python_reference(pairs, iterations):
+    config = replace(_config(), collision_pairs=pairs, iterations=iterations)
     points = find_first_collision(_pose(0.3).points(), _pose(0.0).points(), config)
     python_points = points.copy()
     lengths = np.linalg.norm(points[[1, 2, 3, 5, 6, 7]] - points[[0, 1, 2, 4, 5, 6]], axis=1)
