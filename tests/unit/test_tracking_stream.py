@@ -41,6 +41,20 @@ def _advance(frame, *, sequence=2, sample_time=10.02, **changes):
     )
 
 
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {"policy": object()},
+        {"require_tracked": 1},
+        {"motion_limits": object()},
+        {"rotation_config": object()},
+    ],
+)
+def test_stream_rejects_invalid_settings_through_shared_config(frame, settings):
+    with pytest.raises(ValueError):
+        TrackingPoseStream(TrackingCalibration(frame.identity), **settings)
+
+
 def test_stream_checks_freshness_on_duplicate_ticks_without_retransforming(frame, monkeypatch):
     calibration = TrackingCalibration(frame.identity)
     stream = TrackingPoseStream(calibration)

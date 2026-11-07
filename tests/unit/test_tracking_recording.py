@@ -165,6 +165,34 @@ def test_duplicate_json_fields_are_rejected():
         list(TrackingRecordingReader(io.StringIO(text)))
 
 
+@pytest.mark.parametrize(
+    "kind,component",
+    [
+        ("frame", "position"),
+        ("frame", "orientation"),
+        ("calibration", "translation"),
+        ("calibration", "rotation"),
+    ],
+)
+def test_overflowing_json_geometry_stops_replay(frame, kind, component):
+    event = frame if kind == "frame" else TrackingCalibration(frame.identity)
+
+    def overflow(data):
+        target = data["joints"]["left_wrist"] if kind == "frame" else data
+        target[component] = (
+            [1e308, 2, 3]
+            if component in ("position", "translation")
+            else [[1e308, 0, 0], [0, 1, 0], [0, 0, 1]]
+        )
+
+    text = _changed_record(_record([event]), 1, overflow).replace("1e+308", "1e999")
+    reader = TrackingRecordingReader(io.StringIO(text))
+    with pytest.raises(RecordingError, match="line 2.*finite"):
+        next(reader)
+    with pytest.raises(RecordingError, match="stopped"):
+        next(reader)
+
+
 @pytest.mark.parametrize("tail", ["", '{"type":', '{"type":"end","records":4}\n'])
 def test_truncation_and_wrong_event_count_are_reported(tail):
     lines = _record([TrackingTick(1)]).splitlines(keepends=True)

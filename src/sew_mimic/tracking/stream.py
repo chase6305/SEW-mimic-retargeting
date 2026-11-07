@@ -45,12 +45,8 @@ class TrackingPoseStream:
         rotation_config: OneEuroConfig | None = None,
         motion_limits: TrackingMotionLimits | None = None,
     ) -> None:
-        if not isinstance(calibration, TrackingCalibration) or not isinstance(policy, FramePolicy):
-            raise ValueError("calibration and policy must be TrackingCalibration and FramePolicy")
-        if not isinstance(require_tracked, (bool, np.bool_)):
-            raise ValueError("require_tracked must be a boolean")
-        if motion_limits is not None and not isinstance(motion_limits, TrackingMotionLimits):
-            raise ValueError("motion_limits must be TrackingMotionLimits or None")
+        if not isinstance(calibration, TrackingCalibration):
+            raise ValueError("calibration must be TrackingCalibration")
         self._config = TrackingStreamConfig(
             policy=policy,
             position_filter=OneEuroConfig(min_cutoff, beta, derivative_cutoff),
@@ -60,7 +56,7 @@ class TrackingPoseStream:
         )
         self._calibration = calibration
         self._policy = policy
-        self._require_tracked = bool(require_tracked)
+        self._require_tracked = self._config.require_tracked
         self._motion_limits = motion_limits
         self._motion_reference: TrackingFrame | None = None
         self._buffer = LatestFrameBuffer(
