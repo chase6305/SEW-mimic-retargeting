@@ -48,6 +48,7 @@ from .safety import (
 from .solver import (
     Serial7DoF,
     align_axis,
+    align_wrist_orientation,
     align_wrist_parallel,
     alignment_diagnostics,
     sew_mimic,
@@ -95,6 +96,7 @@ __all__ = [
     "PythonBackend",
     "backend_status",
     "align_axis",
+    "align_wrist_orientation",
     "align_wrist_parallel",
     "alignment_diagnostics",
     "as_vec3",
