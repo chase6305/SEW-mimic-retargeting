@@ -108,11 +108,16 @@ def _number(value: object, name: str) -> float:
 
 
 def _geometry(value: object, shape: tuple[int, ...], name: str) -> list:
+    """Check JSON structure/types; snapshots own finite-array validation and copying."""
     if not isinstance(value, list) or len(value) != shape[0]:
         raise ValueError(f"{name} must have shape {shape}")
     if len(shape) == 1:
-        return [_number(component, name) for component in value]
-    return [_geometry(component, shape[1:], name) for component in value]
+        if any(type(component) not in (int, float) for component in value):
+            raise ValueError(f"{name} must contain JSON numbers")
+    else:
+        for component in value:
+            _geometry(component, shape[1:], name)
+    return value
 
 
 def _decode_identity(value: object) -> TrackingIdentity:
