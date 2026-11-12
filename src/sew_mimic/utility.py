@@ -111,6 +111,78 @@ def equivalent_angles_in_limits(
     return values
 
 
+def _nearest_equivalent_angle(
+    theta: float, q_min: float, q_max: float, reference: float
+) -> float | None:
+    """Select the first limit-valid equivalent without enumerating every turn.
+
+    Inputs are finite and theta is a principal analytical angle. Four nearby
+    turns suffice at ordinary floating-point resolution. Extremely large
+    references can give many turns the same rounded distance; a logarithmic
+    search then retains the public enumerator's smaller-turn tie preference.
+    At enormous angles, distinct integer turns may themselves round to the
+    same float; returned values retain that existing float64 limitation.
+    """
+    theta, q_min, q_max, reference = map(float, (theta, q_min, q_max, reference))
+    if q_min > q_max:
+        raise ValueError("q_min must be <= q_max")
+    lower, upper = q_min - EPS, q_max + EPS
+    # A sub-turn interval containing theta has exactly one equivalent angle.
+    # Leave a margin so EPS-expanded endpoints near ±pi still compete normally.
+    if upper - lower < TWO_PI - EPS and lower <= theta <= upper:
+        return theta
+    anchor = min(upper, max(lower, reference))
+    base = math.floor((anchor - theta) / TWO_PI)
+    if abs(base) <= 2**52:
+        turns = range(base - 1, base + 3)
+    else:
+        # Adjacent integers may collapse to one float. Step to the next
+        # representable integer turns instead of converting a huge index to int32.
+        center = float(base)
+        previous = math.floor(math.nextafter(center, -math.inf))
+        following = math.ceil(math.nextafter(center, math.inf))
+        last = math.ceil(math.nextafter(float(following), math.inf))
+        first_allowed = math.floor((q_min - theta) / TWO_PI) - 1
+        last_allowed = math.ceil((q_max - theta) / TWO_PI) + 1
+        # An integer inside a very narrow interval can round to a representative
+        # outside it. Check the enumerator's endpoints as well as representatives.
+        turns = sorted(
+            {
+                turn
+                for turn in (previous, base, following, last, first_allowed, last_allowed)
+                if first_allowed <= turn <= last_allowed
+            }
+        )
+
+    best = None
+    best_cost = math.inf
+    best_turn = base
+    for turn in turns:
+        value = theta + TWO_PI * turn
+        if lower <= value <= upper:
+            cost = abs(value - reference)
+            if best is None or cost < best_cost:
+                best, best_cost, best_turn = value, cost, turn
+    if best is None:
+        return None
+
+    previous = theta + TWO_PI * (best_turn - 1)
+    if lower <= previous <= upper and abs(previous - reference) == best_cost:
+        # Rounded-distance ties can span more than the four local candidates.
+        # On this side of the nearest turn, the predicate is monotone.
+        first = math.floor((q_min - theta) / TWO_PI) - 1
+        last = best_turn
+        while first < last:
+            middle = (first + last) // 2
+            value = theta + TWO_PI * middle
+            if value >= lower and abs(value - reference) <= best_cost:
+                last = middle
+            else:
+                first = middle + 1
+        best = theta + TWO_PI * first
+    return best
+
+
 def make_frame(
     keypoint_left: Sequence[float],
     keypoint_right: Sequence[float],

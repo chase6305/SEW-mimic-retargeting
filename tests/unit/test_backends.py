@@ -8,6 +8,7 @@ from sew_mimic import (
     SEWMimicError,
     backend_status,
     cpp_backend_available,
+    equivalent_angles_in_limits,
     get_backend,
     rot,
     solve,
@@ -82,6 +83,56 @@ def test_solver_selects_nearby_equivalents_for_multi_turn_joint_limits(backend):
         backend=backend,
     )
     np.testing.assert_allclose(result, target, rtol=0, atol=1e-12)
+
+
+@pytest.mark.parametrize("backend", ["python", "cpp"])
+@pytest.mark.parametrize("reference", [-1e18, 1e18])
+def test_both_solvers_preserve_enumerated_distance_plateaus(backend, reference, monkeypatch):
+    if backend == "cpp" and not cpp_backend_available():
+        pytest.skip("native extension is not built")
+    robot = make_robot()
+    robot.q_min[:] = -1000.0
+    robot.q_max[:] = 1000.0
+    target = np.array([0.3, 0.4, -0.2, 0.7, 0.1, -0.5, 0.2])
+    shoulder = np.zeros(3)
+    elbow = 0.287 * robot.axis_world(target, 3)
+    wrist = elbow + 0.314 * robot.axis_world(target, 5)
+    hand = robot.tool_orientation(target)
+    current = np.full(7, reference)
+
+    def enumerated_nearest(theta, lower, upper, previous):
+        values = equivalent_angles_in_limits(theta, lower, upper, previous)
+        return values[0] if values else None
+
+    # Use the unchanged public enumerator throughout all coupled solve stages
+    # as the oracle; large references make several turns' float costs equal.
+    with monkeypatch.context() as context:
+        context.setattr("sew_mimic.solver._nearest_equivalent_angle", enumerated_nearest)
+        expected = solve(robot, current, shoulder, elbow, wrist, hand, backend="python")
+    actual = solve(robot, current, shoulder, elbow, wrist, hand, backend=backend)
+    np.testing.assert_allclose(actual, expected, rtol=0.0, atol=1e-10)
+    assert np.all(np.isfinite(actual))
+    assert np.all(actual >= robot.q_min - 1e-10)
+    assert np.all(actual <= robot.q_max + 1e-10)
+
+
+@pytest.mark.parametrize("backend", ["python", "cpp"])
+@pytest.mark.parametrize("limit", [1e12, 1e300])
+def test_both_solvers_accept_wide_finite_limits_without_enumerating_turns(backend, limit):
+    if backend == "cpp" and not cpp_backend_available():
+        pytest.skip("native extension is not built")
+    robot = make_robot()
+    robot.q_min[:] = -limit
+    robot.q_max[:] = limit
+    target = np.array([0.3, 0.4, -0.2, 0.7, 0.1, -0.5, 0.2])
+    shoulder = np.zeros(3)
+    elbow = 0.287 * robot.axis_world(target, 3)
+    wrist = elbow + 0.314 * robot.axis_world(target, 5)
+    hand = robot.tool_orientation(target)
+    with np.errstate(all="raise"):
+        actual = solve(robot, target + 0.01, shoulder, elbow, wrist, hand, backend=backend)
+    np.testing.assert_allclose(actual, target, rtol=0.0, atol=1e-10)
+    assert np.all(np.isfinite(actual))
 
 
 def test_empty_python_batch_preserves_documented_output_shape():

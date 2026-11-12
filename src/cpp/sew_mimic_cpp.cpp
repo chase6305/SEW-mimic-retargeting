@@ -7,6 +7,7 @@
 #include <array>
 #include <cmath>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <tuple>
 #include <vector>
@@ -92,18 +93,69 @@ Sp2Result sp2(Vec p1, Vec p2, Vec k1, Vec k2) {
   return out;
 }
 
-std::vector<double> equivalent(double theta, double lower, double upper, double reference) {
-  const int kmin = static_cast<int>(std::floor((lower - theta) / kTwoPi)) - 1;
-  const int kmax = static_cast<int>(std::ceil((upper - theta) / kTwoPi)) + 1;
-  std::vector<double> values;
-  for (int k = kmin; k <= kmax; ++k) {
-    const double value = theta + kTwoPi * k;
-    if (value >= lower - kEps && value <= upper + kEps) values.push_back(value);
+std::optional<double> nearest_equivalent(double theta, double lower, double upper,
+                                         double reference) {
+  // Only the nearest valid turn is used by the solver. Clamp the search anchor
+  // rather than enumerating every turn across potentially very wide limits.
+  const double minimum = lower - kEps, maximum = upper + kEps;
+  // A sub-turn interval containing theta has one equivalent; keep a margin
+  // so EPS-expanded endpoints near +/-pi still compete by reference distance.
+  if (maximum - minimum < kTwoPi - kEps && theta >= minimum && theta <= maximum) return theta;
+  const double anchor = std::clamp(reference, minimum, maximum);
+  const double base = std::floor((anchor - theta) / kTwoPi);
+  std::array<double, 4> turns = {base - 1.0, base, base + 1.0, base + 2.0};
+  if (std::abs(base) >= 0x1p52) {
+    // Above integer precision, adding one may leave a double unchanged. At the
+    // transition nextafter can instead produce a fractional turn, so round it.
+    const double infinity = std::numeric_limits<double>::infinity();
+    const double previous = std::floor(std::nextafter(base, -infinity));
+    const double following = std::ceil(std::nextafter(base, infinity));
+    turns = {previous, base, following, std::ceil(std::nextafter(following, infinity))};
   }
-  std::sort(values.begin(), values.end(), [reference](double a, double b) {
-    return std::abs(a - reference) < std::abs(b - reference);
-  });
-  return values;
+  std::optional<double> best;
+  double best_cost = 0.0, best_turn = 0.0;
+  for (double turn : turns) {
+    const double value = theta + kTwoPi * turn;
+    if (!std::isfinite(value) || value < minimum || value > maximum) continue;
+    const double cost = std::abs(value - reference);
+    // Ascending turns and strict comparison retain the smaller turn on ties.
+    if (!best || cost < best_cost) {
+      best = value;
+      best_cost = cost;
+      best_turn = turn;
+    }
+  }
+  if (!best) return best;
+
+  const auto previous_turn = [](double turn) {
+    return std::abs(turn) < 0x1p52
+               ? turn - 1.0
+               : std::floor(std::nextafter(turn, -std::numeric_limits<double>::infinity()));
+  };
+  const auto tied_or_better = [&](double turn) {
+    const double value = theta + kTwoPi * turn;
+    return std::isfinite(value) && value >= minimum && value <= maximum &&
+           std::abs(value - reference) <= best_cost;
+  };
+  // A distant reference can round many neighbouring costs to exactly the same
+  // double. Preserve the smaller-turn tie rule without enumerating that plateau.
+  if (tied_or_better(previous_turn(best_turn))) {
+    double left = previous_turn(std::floor((lower - theta) / kTwoPi));
+    double right = best_turn;
+    // Use the public enumerator's lower search limit; it can itself round to a
+    // valid candidate when individual integer turns exceed double precision.
+    if (tied_or_better(left)) right = left;
+    while (left < right) {
+      const double middle = std::floor(left + (right - left) / 2.0);
+      if (middle <= left || middle >= right) break;
+      if (tied_or_better(middle))
+        right = middle;
+      else
+        left = middle;
+    }
+    best = theta + kTwoPi * right;
+  }
+  return best;
 }
 
 /** Closed-form, joint-limit-aware solver for one seven-DoF arm.
@@ -178,17 +230,17 @@ class SewMimicSolver {
     double best = 0, qa_best = 0, qb_best = 0;
     for (size_t solution = 0; solution < raw.count; ++solution) {
       const auto [qa, qb] = raw.angles[solution];
-      const auto a = equivalent(qa, robot_.lower[ia], robot_.upper[ia], q0[ia]);
-      if (a.empty()) continue;
-      const auto b = equivalent(qb, robot_.lower[ib], robot_.upper[ib], q0[ib]);
-      if (b.empty()) continue;
+      const auto a = nearest_equivalent(qa, robot_.lower[ia], robot_.upper[ia], q0[ia]);
+      if (!a) continue;
+      const auto b = nearest_equivalent(qb, robot_.lower[ib], robot_.upper[ib], q0[ib]);
+      if (!b) continue;
       // The L1 cost separates by joint; the two nearest entries minimize it.
-      const double cost = std::abs(q0[ia] - a.front()) + std::abs(q0[ib] - b.front());
+      const double cost = std::abs(q0[ia] - *a) + std::abs(q0[ib] - *b);
       if (!found || cost < best) {
         found = true;
         best = cost;
-        qa_best = a.front();
-        qb_best = b.front();
+        qa_best = *a;
+        qb_best = *b;
       }
     }
     if (!found) throw std::runtime_error("AlignAxis solutions violate joint limits");
@@ -197,9 +249,9 @@ class SewMimicSolver {
 
   /// Select the limit-valid 2*pi equivalent nearest the previous joint angle.
   double boundAngle(double theta, int i, double reference) const {
-    auto values = equivalent(theta, robot_.lower[i], robot_.upper[i], reference);
-    if (values.empty()) throw std::runtime_error("Wrist solution violates joint limits");
-    return values.front();
+    const auto value = nearest_equivalent(theta, robot_.lower[i], robot_.upper[i], reference);
+    if (!value) throw std::runtime_error("Wrist solution violates joint limits");
+    return *value;
   }
 
   RobotModel robot_;

@@ -12,6 +12,7 @@ from sew_mimic import (
     rot,
     unit,
 )
+from sew_mimic.utility import EPS, TWO_PI, _nearest_equivalent_angle
 
 
 def test_as_vec3_rejects_non_finite_values():
@@ -71,6 +72,84 @@ def test_rodrigues_rotation_rejects_near_zero_axes(axis):
 def test_equivalent_angles_are_sorted_around_reference():
     values = equivalent_angles_in_limits(0.2, -3 * math.pi, 3 * math.pi, 6.4)
     assert values == pytest.approx([0.2 + 2 * math.pi, 0.2, 0.2 - 2 * math.pi])
+
+
+@pytest.mark.parametrize(
+    "theta,lower,upper,reference",
+    [
+        (0.2, -math.pi, math.pi, 0.3),
+        (0.2, -20 * TWO_PI, 20 * TWO_PI, 12 * TWO_PI + 0.3),
+        (0.2, -20 * TWO_PI, 20 * TWO_PI, -12 * TWO_PI + 0.3),
+        (0.2, 0.1, 0.3, -100.0),
+        (0.2, 0.1, 0.3, 100.0),
+        (0.2, 0.2, 0.2, 1.0),
+        (0.2, 0.3, 0.4, 0.35),
+        (0.0, -TWO_PI, TWO_PI, math.pi),
+        (0.0, -TWO_PI, TWO_PI, -math.pi),
+        (math.pi, -math.pi + 0.5 * EPS, math.pi - 0.5 * EPS, -math.pi),
+        (-math.pi, -math.pi + 0.5 * EPS, math.pi - 0.5 * EPS, math.pi),
+        (0.2, 0.2 + 0.5 * EPS, 0.3, 0.0),
+        (0.2, 0.1, 0.2 - 0.5 * EPS, 0.0),
+        (0.2, 0.2 + 2.0 * EPS, 0.3, 0.0),
+        (0.2, 0.1, 0.2 - 2.0 * EPS, 0.0),
+        (0.2, 0.1, TWO_PI + 0.3, -100.0),
+        (0.2, 0.1, TWO_PI + 0.3, 100.0),
+        (0.2, -1000.0, 1000.0, 1e18),
+        (0.2, -1000.0, 1000.0, -1e18),
+    ],
+)
+def test_nearest_equivalent_matches_public_enumeration(theta, lower, upper, reference):
+    expected = equivalent_angles_in_limits(theta, lower, upper, reference)
+    actual = _nearest_equivalent_angle(theta, lower, upper, reference)
+    if expected:
+        assert actual == expected[0]
+    else:
+        assert actual is None
+
+
+def test_nearest_equivalent_matches_finite_random_enumerations():
+    rng = np.random.default_rng(412)
+    for _ in range(128):
+        theta = rng.uniform(-math.pi, math.pi)
+        lower = rng.uniform(-100 * TWO_PI, 100 * TWO_PI)
+        upper = lower + rng.uniform(0.0, 20 * TWO_PI)
+        reference = rng.uniform(-1000.0, 1000.0)
+        expected = equivalent_angles_in_limits(theta, lower, upper, reference)
+        actual = _nearest_equivalent_angle(theta, lower, upper, reference)
+        assert actual == (expected[0] if expected else None)
+
+
+@pytest.mark.parametrize("base", [2**53, 2**54])
+@pytest.mark.parametrize("direction", [-math.inf, math.inf])
+def test_nearest_equivalent_preserves_narrow_intervals_above_integer_precision(base, direction):
+    theta = 0.2
+    upper = math.nextafter(theta + TWO_PI * base, direction)
+    for lower in (upper, math.nextafter(upper, -math.inf)):
+        # Only a few integer indices lie in these tiny float intervals; the
+        # public enumeration is bounded even though their absolute indices are huge.
+        count = math.ceil((upper - theta) / TWO_PI) - math.floor((lower - theta) / TWO_PI) + 3
+        assert count <= 32
+        for reference in (upper, -1e18):
+            expected = equivalent_angles_in_limits(theta, lower, upper, reference)
+            actual = _nearest_equivalent_angle(theta, lower, upper, reference)
+            assert actual == (expected[0] if expected else None)
+
+
+@pytest.mark.parametrize("reference", [-1e300, 0.3, 1e300])
+def test_nearest_equivalent_does_not_enumerate_enormous_limit_intervals(reference):
+    value = _nearest_equivalent_angle(0.2, -1e300, 1e300, reference)
+    assert value is not None and math.isfinite(value)
+    assert -1e300 <= value <= 1e300
+
+
+@pytest.mark.parametrize("reference", [-1e300, 1e300])
+def test_nearest_equivalent_handles_huge_reference_with_one_valid_turn(reference):
+    assert _nearest_equivalent_angle(0.2, -1.0, 1.0, reference) == 0.2
+
+
+def test_nearest_equivalent_rejects_reversed_limits():
+    with pytest.raises(ValueError, match="q_min must be <= q_max"):
+        _nearest_equivalent_angle(0.2, 1.0, -1.0, 0.0)
 
 
 def test_make_frame_is_orthonormal():

@@ -32,7 +32,7 @@ from .utility import (
     EPS,
     DegenerateGeometryError,
     JointLimitError,
-    equivalent_angles_in_limits,
+    _nearest_equivalent_angle,
     rot,
     unit,
 )
@@ -301,13 +301,13 @@ def sp2(
 
 
 def _bound_angle(theta: float, robot: Serial7DoF, idx: int, reference: float) -> float:
-    vals = equivalent_angles_in_limits(theta, robot.q_min[idx], robot.q_max[idx], reference)
-    if not vals:
+    value = _nearest_equivalent_angle(theta, robot.q_min[idx], robot.q_max[idx], reference)
+    if value is None:
         raise JointLimitError(
             f"No equivalent solution for q{idx + 1}={theta:.6f} rad lies inside "
             f"[{robot.q_min[idx]:.6f}, {robot.q_max[idx]:.6f}]"
         )
-    return vals[0]
+    return value
 
 
 def align_axis(
@@ -369,17 +369,12 @@ def _align_axis(
 
     candidates: List[Tuple[float, float, float]] = []
     for qa_raw, qb_raw in raw_solutions:
-        qa_vals = equivalent_angles_in_limits(
-            qa_raw, robot.q_min[idx_a], robot.q_max[idx_a], q0[idx_a]
-        )
-        if not qa_vals:
+        qa = _nearest_equivalent_angle(qa_raw, robot.q_min[idx_a], robot.q_max[idx_a], q0[idx_a])
+        if qa is None:
             continue
-        qb_vals = equivalent_angles_in_limits(
-            qb_raw, robot.q_min[idx_b], robot.q_max[idx_b], q0[idx_b]
-        )
-        if qb_vals:
-            # The L1 cost separates by joint; each list is already nearest-first.
-            qa, qb = qa_vals[0], qb_vals[0]
+        qb = _nearest_equivalent_angle(qb_raw, robot.q_min[idx_b], robot.q_max[idx_b], q0[idx_b])
+        if qb is not None:
+            # The L1 cost separates by joint; select each nearest turn directly.
             candidates.append((abs(q0[idx_a] - qa) + abs(q0[idx_b] - qb), qa, qb))
 
     if not candidates:
