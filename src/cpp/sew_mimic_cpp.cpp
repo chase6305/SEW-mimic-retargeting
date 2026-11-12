@@ -42,39 +42,54 @@ std::pair<double, bool> sp1(Vec p1, Vec p2, Vec k) {
           std::abs(norm(p1) - norm(p2)) > 1e-8 || std::abs(dot(k, p1) - dot(k, p2)) > 1e-8};
 }
 
-std::pair<std::vector<double>, bool> sp4(Vec h, Vec p, Vec k, double d) {
+struct Sp4Result {
+  std::array<double, 2> angles{};
+  size_t count = 0;
+  bool least_squares = false;
+};
+
+Sp4Result sp4(Vec h, Vec p, Vec k, double d) {
   h = unit(h);
   k = unit(k);
   const Vec a11 = cross(k, p);
   const Vec a12 = scale(cross(k, a11), -1.0);
   const double a0 = dot(h, a11), a1 = dot(h, a12);
   const double b = d - dot(h, k) * dot(k, p), n2 = a0 * a0 + a1 * a1;
-  if (n2 < kEps) return {{0.0}, std::abs(dot(h, p) - d) > 1e-8};
+  if (n2 < kEps) return {{0.0, 0.0}, 1, std::abs(dot(h, p) - d) > 1e-8};
   const Vec hp = scale(h, b);
   const double x0 = dot(a11, hp), x1 = dot(a12, hp);
   if (n2 > b * b + 1e-12) {
     const double xi = std::sqrt(std::max(0.0, n2 - b * b));
-    return {{std::atan2(x0 + xi * a1, x1 - xi * a0), std::atan2(x0 - xi * a1, x1 + xi * a0)},
-            false};
+    return {
+        {std::atan2(x0 + xi * a1, x1 - xi * a0), std::atan2(x0 - xi * a1, x1 + xi * a0)}, 2, false};
   }
   const double theta = std::atan2(x0, x1);
-  return {{theta}, std::abs(dot(h, mul(rot(k, theta), p)) - d) > 1e-8};
+  return {{theta, 0.0}, 1, std::abs(dot(h, mul(rot(k, theta), p)) - d) > 1e-8};
 }
 
-std::pair<std::vector<std::pair<double, double>>, bool> sp2(Vec p1, Vec p2, Vec k1, Vec k2) {
+struct Sp2Result {
+  std::array<std::pair<double, double>, 2> angles{};
+  size_t count = 0;
+  bool least_squares = false;
+};
+
+Sp2Result sp2(Vec p1, Vec p2, Vec k1, Vec k2) {
   k1 = unit(k1);
   k2 = unit(k2);
   if (norm(cross(k1, k2)) < kEps) throw std::runtime_error("SP2 axes are parallel");
   const double length_error = std::abs(norm(p1) - norm(p2));
   Vec n1 = unit(p1), n2 = unit(p2);
-  auto [t1, ls1] = sp4(k2, n1, k1, dot(k2, n2));
-  auto [t2, ls2] = sp4(k1, n2, k2, dot(k1, n1));
-  std::vector<std::pair<double, double>> out;
-  if (t1.size() > 1 || t2.size() > 1)
-    out = {{t1.front(), t2.back()}, {t1.back(), t2.front()}};
-  else
-    out = {{t1.front(), t2.front()}};
-  return {out, length_error > 1e-8 || ls1 || ls2};
+  const auto t1 = sp4(k2, n1, k1, dot(k2, n2));
+  const auto t2 = sp4(k1, n2, k2, dot(k1, n1));
+  Sp2Result out;
+  out.angles[0] = {t1.angles[0], t2.angles[t2.count - 1]};
+  out.count = 1;
+  if (t1.count > 1 || t2.count > 1) {
+    out.angles[1] = {t1.angles[t1.count - 1], t2.angles[0]};
+    out.count = 2;
+  }
+  out.least_squares = length_error > 1e-8 || t1.least_squares || t2.least_squares;
+  return out;
 }
 
 std::vector<double> equivalent(double theta, double lower, double upper, double reference) {
@@ -98,7 +113,16 @@ std::vector<double> equivalent(double theta, double lower, double upper, double 
  */
 class SewMimicSolver {
  public:
-  explicit SewMimicSolver(RobotModel robot) : robot_(std::move(robot)) {}
+  explicit SewMimicSolver(RobotModel robot) : robot_(std::move(robot)) {
+    // Prepare R_local K and R_local K² from the immutable calibrated snapshot.
+    // Match rot()'s axis normalization once here instead of on every frame.
+    for (size_t joint = 0; joint < robot_.axes.size(); ++joint) {
+      const auto [x, y, z] = unit(robot_.axes[joint]);
+      const Mat skew = {0.0, -z, y, z, 0.0, -x, -y, x, 0.0};
+      local_skew_[joint] = mul(robot_.local[joint], skew);
+      local_skew_squared_[joint] = mul(local_skew_[joint], skew);
+    }
+  }
 
   /** Solve one frame expressed in the robot arm-base coordinate system.
    *
@@ -132,7 +156,12 @@ class SewMimicSolver {
 
  private:
   Mat jointRotation(int joint, double angle) const {
-    return mul(robot_.local[joint], rot(robot_.axes[joint], angle));
+    const double sine = std::sin(angle), complement = 1.0 - std::cos(angle);
+    Mat rotation;
+    for (size_t index = 0; index < rotation.size(); ++index)
+      rotation[index] = robot_.local[joint][index] + sine * local_skew_[joint][index] +
+                        complement * local_skew_squared_[joint][index];
+    return rotation;
   }
 
   /// Paper Algorithm 2; solve q_(i-2), q_(i-1) for axis i in {3, 5, 7}.
@@ -144,11 +173,11 @@ class SewMimicSolver {
     // base-to-frame chain cancels, leaving only fixed local transforms.
     const Vec hi = mul(robot_.local[frame], mul(robot_.local[frame + 1], robot_.axes[i - 1]));
     const Vec hp = mul(robot_.local[frame], robot_.axes[i - 2]);
-    auto [raw, unused] = sp2(vf, hi, scale(robot_.axes[i - 3], -1.0), hp);
-    (void)unused;
+    const auto raw = sp2(vf, hi, scale(robot_.axes[i - 3], -1.0), hp);
     bool found = false;
     double best = 0, qa_best = 0, qb_best = 0;
-    for (auto [qa, qb] : raw) {
+    for (size_t solution = 0; solution < raw.count; ++solution) {
+      const auto [qa, qb] = raw.angles[solution];
       const auto a = equivalent(qa, robot_.lower[ia], robot_.upper[ia], q0[ia]);
       if (a.empty()) continue;
       const auto b = equivalent(qb, robot_.lower[ib], robot_.upper[ib], q0[ib]);
@@ -174,6 +203,8 @@ class SewMimicSolver {
   }
 
   RobotModel robot_;
+  std::array<Mat, 7> local_skew_{};
+  std::array<Mat, 7> local_skew_squared_{};
 };
 
 /** Allocation-light capsule collision queries in metres.
