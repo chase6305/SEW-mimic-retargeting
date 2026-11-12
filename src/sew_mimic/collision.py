@@ -11,7 +11,7 @@ import numpy as np
 from .utility import EPS, as_vec3
 
 logger = logging.getLogger(__name__)
-_SEGMENT_CANCELLATION_THRESHOLD = np.sqrt(np.finfo(np.float64).eps)
+_SEGMENT_CANCELLATION_THRESHOLD = float(np.sqrt(np.finfo(np.float64).eps))
 
 
 @dataclass(frozen=True)
@@ -203,8 +203,11 @@ def _capsule_distances_unchecked(
     np.clip(s, 0.0, 1.0, out=s)
     np.clip(t, 0.0, 1.0, out=t)
 
-    delta = (starts_b + t[:, None] * v) - (starts_a + s[:, None] * u)
-    return np.sqrt(np.einsum("ij,ij->i", delta, delta)) - radii_a - radii_b
+    # Reuse owned scratch and cancel the common translation before adding
+    # local offsets, avoiding two rounded world-frame closest points.
+    w += s[:, None] * u
+    w -= t[:, None] * v
+    return np.sqrt(np.einsum("ij,ij->i", w, w)) - radii_a - radii_b
 
 
 def capsule_from_oobb(mesh_path: str | Path, *, padding: float = 1.05, name: str = "") -> Capsule:

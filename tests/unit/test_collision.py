@@ -124,6 +124,32 @@ def test_parallel_capsule_distance_is_invariant_to_endpoint_order(reverse_a, rev
     _assert_capsule_distances(endpoints, 1e-4, 3e-4, 1e-3)
 
 
+@pytest.mark.parametrize("translation", [1e9, 1e12])
+@pytest.mark.parametrize(
+    "second_start,second_end,center_distance",
+    [
+        ([1, 1, 0], [1, 1, 0], np.sqrt(0.4)),
+        ([1, -1, 1], [1, 2, 2], np.sqrt(91.0) / 7),
+    ],
+)
+def test_vectorized_capsule_distance_preserves_clearance_under_large_translation(
+    translation, second_start, second_end, center_distance
+):
+    # Integral endpoints remain exactly representable after translation, but
+    # their closest points have fractional coordinates. Computing those in
+    # world coordinates first would lose precision at these large offsets.
+    offset = np.array([translation, -translation, translation])
+    starts = np.array([[0, 0, 0], second_start], dtype=float) + offset
+    ends = np.array([[3, 1, 0], second_end], dtype=float) + offset
+    starts.flags.writeable = False
+    ends.flags.writeable = False
+    with np.errstate(all="raise"):
+        distance = _capsule_distances_unchecked(
+            starts[:1], ends[:1], starts[1:], ends[1:], np.array([0.1]), np.array([0.1])
+        )
+    assert distance[0] == pytest.approx(center_distance - 0.2, rel=1e-13, abs=1e-14)
+
+
 @pytest.mark.parametrize("scale", [1e-5, 0.01, 1.0, 1e3])
 def test_vectorized_capsule_distances_match_scalar_kernel(scale):
     rng = np.random.default_rng(4)
