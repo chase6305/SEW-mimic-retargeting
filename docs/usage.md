@@ -99,7 +99,9 @@ The result is `(N, 7)`. Each frame starts from the previous solution, preserving
 single-frame branch selection. Both backends follow this contract.
 
 C++ caches up to 16 calibrated robot solvers; `get_backend("cpp").clear_cache()`
-releases them. Native computation releases the GIL after input validation.
+releases them. The native solver captures calibration when it is first prepared;
+clear the cache before solving with an edited model. Native computation releases
+the GIL after input validation.
 Applications own worker threads and scheduling. A safety filter's selected
 backend applies to solving, prepared FK, capsule checks, and XPBD projection.
 See [architecture](architecture.md) for model ownership.

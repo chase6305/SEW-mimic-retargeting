@@ -64,6 +64,17 @@ XPBD consumes centerline distance, normal and segment parameters; the public
 `capsule_contact()` API constructs surface contact points when requested.
 Scalar segment clamps use scalar arithmetic instead of repeated NumPy dispatch.
 
+`SafetyFilterConfig` prepares the Python query's capsule-pair endpoint mappings
+and radii once. These arrays own their data and are read-only; replacing a
+configuration rebuilds them. Each distance query gathers the current endpoints
+into its own scratch arrays, so independent calls share no mutable frame data.
+
+The Python single-arm solver carries solved rotation prefixes through the
+shoulder, elbow and wrist stages within each call. It does not cache the mutable
+`Serial7DoF` model between calls, so calibration edits take effect on the next
+Python solve. Local Rodrigues rotations are assembled directly without
+temporary skew and identity matrices.
+
 Validation compares prepared FK against direct tree traversal for randomized
 Marvin/OpenArm configurations and a mixed revolute/prismatic/fixed tree. It
 also covers output ordering, omitted joints, empty outputs, geometry ownership,

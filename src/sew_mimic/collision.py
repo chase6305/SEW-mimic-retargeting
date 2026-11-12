@@ -211,7 +211,7 @@ def _capsule_distances_unchecked(
 
 
 def capsule_from_oobb(mesh_path: str | Path, *, padding: float = 1.05, name: str = "") -> Capsule:
-    """Approximate a mesh OOBB with a conservative capsule.
+    """Approximate a mesh OOBB with a capsule along its longest axis.
 
     ``trimesh`` is imported lazily because OOBB fitting is an offline robot
     configuration step, not part of the real-time safety-filter loop.
