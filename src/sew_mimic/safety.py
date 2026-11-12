@@ -119,6 +119,7 @@ class SafetyFilterConfig:
     capsule_radii: np.ndarray = field(init=False, repr=False, compare=False)
     link_radii: np.ndarray = field(init=False, repr=False, compare=False)
     interpolation_point_radii: np.ndarray = field(init=False, repr=False, compare=False)
+    _collision_query: tuple[np.ndarray, ...] = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         torso_start = np.array(self.torso_start, dtype=np.float64, copy=True)
@@ -190,6 +191,24 @@ class SafetyFilterConfig:
         object.__setattr__(self, "capsule_radii", capsule_radii)
         object.__setattr__(self, "interpolation_point_radii", interpolation_point_radii)
 
+        # Python queries gather pair endpoints directly from the eight moving
+        # points followed by the torso endpoints, rather than assembling seven
+        # full capsules and gathering their endpoints and radii every frame.
+        starts = np.asarray([8, *_CAPSULE_START_POINT_INDICES], dtype=np.intp)
+        ends = np.asarray([9, *_CAPSULE_END_POINT_INDICES], dtype=np.intp)
+        first, second = pair_indices[:, 0], pair_indices[:, 1]
+        collision_query = (
+            starts[first],
+            ends[first],
+            starts[second],
+            ends[second],
+            capsule_radii[first],
+            capsule_radii[second],
+        )
+        for values in collision_query:
+            values.flags.writeable = False
+        object.__setattr__(self, "_collision_query", collision_query)
+
 
 class SafetyFilterStatus(str, Enum):
     """Machine-readable outcome of one bimanual safety-filter call."""
@@ -233,19 +252,6 @@ _CAPSULE_START_POINT_INDICES = np.asarray([0, 1, 2, 4, 5, 6], dtype=np.intp)
 _CAPSULE_END_POINT_INDICES = np.asarray([1, 2, 3, 5, 6, 7], dtype=np.intp)
 _CAPSULE_START_POINT_INDICES.flags.writeable = False
 _CAPSULE_END_POINT_INDICES.flags.writeable = False
-
-
-def _capsule_arrays(
-    points: np.ndarray, config: SafetyFilterConfig
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Build compact capsule arrays for the real-time collision hot path."""
-    starts = np.empty((7, 3), dtype=np.float64)
-    ends = np.empty((7, 3), dtype=np.float64)
-    starts[0] = config.torso_start
-    ends[0] = config.torso_end
-    starts[1:] = points[_CAPSULE_START_POINT_INDICES]
-    ends[1:] = points[_CAPSULE_END_POINT_INDICES]
-    return starts, ends, config.capsule_radii
 
 
 def _default_collision_pairs() -> tuple[tuple[int, int], ...]:
@@ -293,11 +299,13 @@ def minimum_capsule_distance(
         )
     if backend != "python":
         raise ValueError("backend must be one of: python, cpp")
-    starts, ends, radii = _capsule_arrays(points, config)
-    first = config.collision_pair_indices[:, 0]
-    second = config.collision_pair_indices[:, 1]
+    vertices = np.empty((10, 3), dtype=np.float64)
+    vertices[:8] = points
+    vertices[8] = config.torso_start
+    vertices[9] = config.torso_end
+    start_a, end_a, start_b, end_b, radii_a, radii_b = config._collision_query
     distances = _capsule_distances_unchecked(
-        starts[first], ends[first], starts[second], ends[second], radii[first], radii[second]
+        vertices[start_a], vertices[end_a], vertices[start_b], vertices[end_b], radii_a, radii_b
     )
     return float(np.min(distances))
 
