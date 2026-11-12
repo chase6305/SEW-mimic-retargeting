@@ -13,7 +13,7 @@ import numpy as np
 
 from .backends import get_cpp_collision_backend
 from .collision import _capsule_contact_unchecked, _capsule_distances_unchecked
-from .utility import EPS, SEWMimicError, is_rotation_matrix, unit
+from .utility import EPS, SEWMimicError, _rodrigues_rotation, is_rotation_matrix, unit
 
 logger = logging.getLogger(__name__)
 
@@ -468,9 +468,8 @@ def recover_tool_orientation(current: np.ndarray, target_direction: np.ndarray) 
         # The tool's own Y axis is always perpendicular to its X direction,
         # including when that direction coincides with the world's Y axis.
         return current * np.array([-1.0, 1.0, -1.0])
-    x, y, z = axis / sine
-    cross = np.array([[0.0, -z, y], [z, 0.0, -x], [-y, x, 0.0]])
-    rotation = np.eye(3) + sine * cross + (1.0 - cosine) * (cross @ cross)
+    x, y, z = map(float, axis / sine)
+    rotation = _rodrigues_rotation(x, y, z, sine, 1.0 - cosine)
     return rotation @ current
 
 

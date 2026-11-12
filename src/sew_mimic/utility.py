@@ -57,11 +57,8 @@ def skew(value: Sequence[float]) -> np.ndarray:
     return np.array([[0.0, -z, y], [z, 0.0, -x], [-y, x, 0.0]], dtype=np.float64)
 
 
-def rot(axis: Sequence[float], theta: float) -> np.ndarray:
-    """Return the Rodrigues rotation ``R(axis, theta)``."""
-    x, y, z = map(float, unit(axis))
-    sine = math.sin(theta)
-    complement = 1.0 - math.cos(theta)
+def _rodrigues_rotation(x: float, y: float, z: float, sine: float, complement: float) -> np.ndarray:
+    """Build a rotation from unit-axis coordinates, sin(theta), and 1-cos(theta)."""
     xy, xz, yz = complement * x * y, complement * x * z, complement * y * z
     sx, sy, sz = sine * x, sine * y, sine * z
     # Expand I + sin(theta) K + (1 - cos(theta)) K² directly, avoiding
@@ -74,6 +71,12 @@ def rot(axis: Sequence[float], theta: float) -> np.ndarray:
         ],
         dtype=np.float64,
     )
+
+
+def rot(axis: Sequence[float], theta: float) -> np.ndarray:
+    """Return the Rodrigues rotation ``R(axis, theta)``."""
+    x, y, z = map(float, unit(axis))
+    return _rodrigues_rotation(x, y, z, math.sin(theta), 1.0 - math.cos(theta))
 
 
 def wrap_to_pi(theta: float) -> float:
