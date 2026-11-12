@@ -11,6 +11,7 @@ import numpy as np
 from .utility import EPS, as_vec3
 
 logger = logging.getLogger(__name__)
+_SEGMENT_CANCELLATION_THRESHOLD = np.sqrt(np.finfo(np.float64).eps)
 
 
 @dataclass(frozen=True)
@@ -61,15 +62,28 @@ def _closest_points_on_segments_unchecked(
     aa, bb, cc = float(u @ u), float(u @ v), float(v @ v)
     dd, ee = float(u @ w), float(v @ w)
 
-    if aa <= EPS and cc <= EPS:
+    if aa <= EPS * EPS and cc <= EPS * EPS:
         return a0, b0, 0.0, 0.0
-    if aa <= EPS:
+    if aa <= EPS * EPS:
         s, t = 0.0, min(1.0, max(0.0, ee / cc))
-    elif cc <= EPS:
+    elif cc <= EPS * EPS:
         s, t = min(1.0, max(0.0, -dd / aa)), 0.0
     else:
         denominator = aa * cc - bb * bb
-        s = 0.0 if denominator <= EPS else min(1.0, max(0.0, (bb * ee - cc * dd) / denominator))
+        numerator = bb * ee - cc * dd
+        if denominator <= _SEGMENT_CANCELLATION_THRESHOLD * aa * cc:
+            # Near parallelism makes both dot-product differences cancel.
+            # This threshold selects a formula, not a parallel-segment cutoff:
+            # even a tiny nonzero crossing angle can have an interior minimum.
+            ux, uy, uz = u
+            vx, vy, vz = v
+            wx, wy, wz = w
+            cx, cy, cz = uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx
+            denominator = cx * cx + cy * cy + cz * cz
+            numerator = (
+                (vy * wz - vz * wy) * cx + (vz * wx - vx * wz) * cy + (vx * wy - vy * wx) * cz
+            )
+        s = 0.0 if denominator == 0.0 else min(1.0, max(0.0, numerator / denominator))
         t = (bb * s + ee) / cc
         if t < 0.0:
             t, s = 0.0, min(1.0, max(0.0, -dd / aa))
@@ -155,15 +169,26 @@ def _capsule_distances_unchecked(
     cc = np.einsum("ij,ij->i", v, v)
     dd = np.einsum("ij,ij->i", u, w)
     ee = np.einsum("ij,ij->i", v, w)
-    a_valid = aa > EPS
-    b_valid = cc > EPS
+    a_valid = aa > EPS * EPS
+    b_valid = cc > EPS * EPS
     denominator = aa * cc - bb * bb
+    numerator = bb * ee - cc * dd
+    cancellation = a_valid & b_valid & (denominator <= _SEGMENT_CANCELLATION_THRESHOLD * aa * cc)
+    if np.any(cancellation):
+        ux, uy, uz = u[cancellation].T
+        vx, vy, vz = v[cancellation].T
+        wx, wy, wz = w[cancellation].T
+        cx, cy, cz = uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx
+        denominator[cancellation] = cx * cx + cy * cy + cz * cz
+        numerator[cancellation] = (
+            (vy * wz - vz * wy) * cx + (vz * wx - vx * wz) * cy + (vx * wy - vy * wx) * cz
+        )
     s = np.zeros_like(aa)
     np.divide(
-        bb * ee - cc * dd,
+        numerator,
         denominator,
         out=s,
-        where=a_valid & b_valid & (denominator > EPS),
+        where=a_valid & b_valid & (denominator > 0.0),
     )
     np.clip(s, 0.0, 1.0, out=s)
     t = np.zeros_like(aa)

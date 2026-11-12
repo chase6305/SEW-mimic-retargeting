@@ -30,13 +30,6 @@ class RobotModel {
   std::array<Mat, 7> local;
   Joints lower, upper;
   Mat tool, align;
-
-  /// Return base<-frame rotation for frame indices in [0, 7].
-  Mat r0(const Joints& q, int frame) const {
-    Mat r = eye();
-    for (int j = 0; j < frame; ++j) r = mul(r, mul(local[j], rot(axes[j], q[j])));
-    return r;
-  }
 };
 
 std::pair<double, bool> sp1(Vec p1, Vec p2, Vec k) {
@@ -121,11 +114,15 @@ class SewMimicSolver {
       throw std::runtime_error("Initial joint vector must be finite");
     const Vec upper = unit(sub(elbow, shoulder));
     const Vec lower = unit(sub(wrist, elbow));
-    std::tie(q[0], q[1]) = alignAxis(3, q, upper);
-    std::tie(q[2], q[3]) = alignAxis(5, q, lower);
+    std::tie(q[0], q[1]) = alignAxis(3, q, upper, eye());
+    Mat prefix = mul(jointRotation(0, q[0]), jointRotation(1, q[1]));
+    std::tie(q[2], q[3]) = alignAxis(5, q, lower, prefix);
+    prefix = mul(mul(prefix, jointRotation(2, q[2])), jointRotation(3, q[3]));
     const Mat desired = mul(mul(hand, transpose(robot_.align)), transpose(robot_.tool));
-    std::tie(q[4], q[5]) = alignAxis(7, q, mul(desired, robot_.axes[6]));
-    const Vec u6 = mul(transpose(desired), mul(robot_.r0(q, 6), robot_.axes[5]));
+    std::tie(q[4], q[5]) = alignAxis(7, q, mul(desired, robot_.axes[6]), prefix);
+    // q6 rotates its own axis without changing it; only q5 extends R04.
+    const Vec u6 = mul(transpose(desired), mul(mul(prefix, jointRotation(4, q[4])),
+                                               mul(robot_.local[5], robot_.axes[5])));
     const Vec h6 = mul(transpose(robot_.local[6]), robot_.axes[5]);
     auto [q7, unused] = sp1(h6, u6, scale(robot_.axes[6], -1.0));
     (void)unused;
@@ -134,11 +131,15 @@ class SewMimicSolver {
   }
 
  private:
+  Mat jointRotation(int joint, double angle) const {
+    return mul(robot_.local[joint], rot(robot_.axes[joint], angle));
+  }
+
   /// Paper Algorithm 2; solve q_(i-2), q_(i-1) for axis i in {3, 5, 7}.
-  std::pair<double, double> alignAxis(int i, const Joints& q0, Vec target) const {
+  std::pair<double, double> alignAxis(int i, const Joints& q0, Vec target, Mat prefix) const {
     target = unit(target);
     const int ia = i - 3, ib = i - 2, frame = i - 2;
-    const Vec vf = mul(transpose(mul(robot_.r0(q0, ia), robot_.local[ia])), target);
+    const Vec vf = mul(transpose(mul(prefix, robot_.local[ia])), target);
     // q_(i-1) is zero and joint i cannot rotate its own axis. The shared
     // base-to-frame chain cancels, leaving only fixed local transforms.
     const Vec hi = mul(robot_.local[frame], mul(robot_.local[frame + 1], robot_.axes[i - 1]));
@@ -147,17 +148,20 @@ class SewMimicSolver {
     (void)unused;
     bool found = false;
     double best = 0, qa_best = 0, qb_best = 0;
-    for (auto [qa, qb] : raw)
-      for (double a : equivalent(qa, robot_.lower[ia], robot_.upper[ia], q0[ia]))
-        for (double b : equivalent(qb, robot_.lower[ib], robot_.upper[ib], q0[ib])) {
-          const double cost = std::abs(q0[ia] - a) + std::abs(q0[ib] - b);
-          if (!found || cost < best) {
-            found = true;
-            best = cost;
-            qa_best = a;
-            qb_best = b;
-          }
-        }
+    for (auto [qa, qb] : raw) {
+      const auto a = equivalent(qa, robot_.lower[ia], robot_.upper[ia], q0[ia]);
+      if (a.empty()) continue;
+      const auto b = equivalent(qb, robot_.lower[ib], robot_.upper[ib], q0[ib]);
+      if (b.empty()) continue;
+      // The L1 cost separates by joint; the two nearest entries minimize it.
+      const double cost = std::abs(q0[ia] - a.front()) + std::abs(q0[ib] - b.front());
+      if (!found || cost < best) {
+        found = true;
+        best = cost;
+        qa_best = a.front();
+        qb_best = b.front();
+      }
+    }
     if (!found) throw std::runtime_error("AlignAxis solutions violate joint limits");
     return {qa_best, qb_best};
   }
@@ -244,14 +248,21 @@ class CapsuleCollisionDetector {
     const double dd = dot(u, w), ee = dot(v, w);
     double s = 0.0, t = 0.0;
     auto clamp = [](double value) { return std::clamp(value, 0.0, 1.0); };
-    if (aa <= kEps && cc <= kEps) return {a0, b0, 0.0, 0.0};
-    if (aa <= kEps) {
+    if (aa <= kEps * kEps && cc <= kEps * kEps) return {a0, b0, 0.0, 0.0};
+    if (aa <= kEps * kEps) {
       t = clamp(ee / cc);
-    } else if (cc <= kEps) {
+    } else if (cc <= kEps * kEps) {
       s = clamp(-dd / aa);
     } else {
-      const double denominator = aa * cc - bb * bb;
-      if (denominator > kEps) s = clamp((bb * ee - cc * dd) / denominator);
+      double denominator = aa * cc - bb * bb;
+      double numerator = bb * ee - cc * dd;
+      if (denominator <= std::sqrt(std::numeric_limits<double>::epsilon()) * aa * cc) {
+        // Select a stable formula without classifying tiny crossing angles as parallel.
+        const Vec perpendicular = cross(u, v);
+        denominator = dot(perpendicular, perpendicular);
+        numerator = dot(cross(v, w), perpendicular);
+      }
+      if (denominator > 0.0) s = clamp(numerator / denominator);
       t = (bb * s + ee) / cc;
       if (t < 0.0) {
         t = 0.0;

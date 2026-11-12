@@ -3,7 +3,19 @@ import math
 import numpy as np
 import pytest
 
-from sew_mimic import Serial7DoF, align_axis, rot, sew_mimic, sp1, sp2, sp4
+from sew_mimic import (
+    Serial7DoF,
+    align_axis,
+    align_wrist_orientation,
+    cpp_backend_available,
+    equivalent_angles_in_limits,
+    rot,
+    sew_mimic,
+    solve,
+    sp1,
+    sp2,
+    sp4,
+)
 
 
 def build_robot():
@@ -112,6 +124,107 @@ def test_axis_alignment_selects_nearest_multi_turn_equivalents():
     current = expected.copy()
     current[:2] += 0.01
     assert align_axis(robot, 3, current, target) == pytest.approx(expected[:2], abs=1e-12)
+
+
+def _solve_with_independent_rotations(robot, current, shoulder, elbow, wrist, hand):
+    """Recover each stage separately, including the full six-joint wrist FK."""
+    result = current.copy()
+    result[:2] = align_axis(robot, 3, result, elbow - shoulder)
+    result[2:4] = align_axis(robot, 5, result, wrist - elbow)
+    desired = hand @ robot.R_align.T @ robot.R_7T_local.T
+    result[4:6] = align_axis(robot, 7, result, desired @ robot.axes_local[6])
+    target = desired.T @ (robot.R0(result, 6) @ robot.axes_local[5])
+    theta, _ = sp1(robot.R_local[6].T @ robot.axes_local[5], target, -robot.axes_local[6])
+    result[6] = equivalent_angles_in_limits(theta, robot.q_min[6], robot.q_max[6], current[6])[0]
+    return result
+
+
+@pytest.mark.parametrize("negative_axes", [False, True])
+@pytest.mark.parametrize("backend", ["python", "cpp"])
+def test_solver_prefix_matches_independent_fk_with_calibrated_frames(negative_axes, backend):
+    if backend == "cpp" and not cpp_backend_available():
+        pytest.skip("native extension is not built")
+    rng = np.random.default_rng(410)
+    frames = [np.eye(3)] + [rot(rng.normal(size=3), rng.uniform(-3, 3)) for _ in range(7)]
+    axes = build_robot().axes_local
+    if negative_axes:
+        axes[::2] *= -1.0
+    robot = Serial7DoF(
+        axes_local=np.array([frames[i + 1].T @ axis for i, axis in enumerate(axes)]),
+        R_local=np.array([frames[i].T @ frames[i + 1] for i in range(7)]),
+        q_min=np.full(7, -4.0 * np.pi),
+        q_max=np.full(7, 4.0 * np.pi),
+        R_7T_local=frames[7].T @ rot([1, 2, -3], 0.41),
+        R_align=rot([-2, 1, 3], -0.29),
+    )
+    for index, reference in enumerate(rng.uniform(-1.3, 1.3, size=(16, 7))):
+        if index < 2:
+            reference[5] = 0.0  # Wrist singularity: q5 and q7 share the remaining spin.
+        current = rng.uniform(-9, 9, size=7)
+        original = current.copy()
+        shoulder = rng.normal(size=3)
+        upper = robot.axis_world(reference, 3)
+        lower = robot.axis_world(reference, 5)
+        elbow = shoulder + 0.33 * upper
+        wrist = elbow + 0.27 * lower
+        hand = robot.tool_orientation(reference)
+
+        expected = _solve_with_independent_rotations(robot, current, shoulder, elbow, wrist, hand)
+        result = solve(robot, current, shoulder, elbow, wrist, hand, backend=backend)
+        np.testing.assert_allclose(result, expected, rtol=0.0, atol=1e-10)
+        np.testing.assert_array_equal(current, original)
+        np.testing.assert_allclose(robot.axis_world(result, 3), upper, atol=1e-9)
+        np.testing.assert_allclose(robot.axis_world(result, 5), lower, atol=1e-9)
+        np.testing.assert_allclose(robot.tool_orientation(result), hand, atol=1e-9)
+        np.testing.assert_allclose(
+            align_wrist_orientation(robot, expected, hand), result[4:], atol=1e-10
+        )
+        assert np.all(result >= robot.q_min - 1e-10)
+        assert np.all(result <= robot.q_max + 1e-10)
+
+
+def test_public_wrist_accepts_readonly_joints_without_mutating_input():
+    robot = build_robot()
+    reference = np.array([0.2, -0.3, 0.4, -0.5, 0.6, -0.7, 0.8])
+    current = reference.copy()
+    current[4:] += 0.1
+    original = current.copy()
+    current.flags.writeable = False
+    hand = robot.tool_orientation(reference)
+    wrist = align_wrist_orientation(robot, current, hand)
+    np.testing.assert_array_equal(current, original)
+    np.testing.assert_allclose(
+        robot.tool_orientation(np.concatenate((current[:4], wrist))), hand, atol=1e-12
+    )
+
+
+@pytest.mark.parametrize("value", [np.nan, np.inf, -np.inf])
+def test_public_wrist_rejects_nonfinite_initial_joints(value):
+    current = np.zeros(7)
+    current[6] = value
+    with pytest.raises(ValueError, match="finite"):
+        align_wrist_orientation(build_robot(), current, np.eye(3))
+
+
+def test_solver_prefix_uses_current_model_after_calibration_changes():
+    robot = build_robot()
+    reference = np.array([0.2, -0.3, 0.4, -0.5, 0.6, -0.7, 0.8])
+    current = np.zeros(7)
+    for changed in (False, True):
+        if changed:
+            robot.R_local[0] = rot([1, 2, 3], 0.37) @ robot.R_local[0]
+            robot.axes_local[6] *= -1.0
+            robot.R_7T_local[:] = rot([-1, 1, 2], -0.48)
+            robot.R_align[:] = rot([2, -1, 3], 0.21)
+        shoulder = np.zeros(3)
+        elbow = 0.33 * robot.axis_world(reference, 3)
+        wrist = elbow + 0.27 * robot.axis_world(reference, 5)
+        hand = robot.tool_orientation(reference)
+        expected = _solve_with_independent_rotations(robot, current, shoulder, elbow, wrist, hand)
+        result = sew_mimic(robot, current, shoulder, elbow, wrist, hand)
+        np.testing.assert_allclose(result, expected, atol=1e-12)
+        np.testing.assert_allclose(robot.tool_orientation(result), hand, atol=1e-12)
+        current = result
 
 
 def test_relative_rotations_and_world_axes_match_full_fk_with_fixed_transforms():

@@ -59,10 +59,20 @@ def skew(value: Sequence[float]) -> np.ndarray:
 
 def rot(axis: Sequence[float], theta: float) -> np.ndarray:
     """Return the Rodrigues rotation ``R(axis, theta)``."""
-    axis = unit(axis)
-    axis_skew = skew(axis)
-    return (
-        np.eye(3) + math.sin(theta) * axis_skew + (1.0 - math.cos(theta)) * (axis_skew @ axis_skew)
+    x, y, z = map(float, unit(axis))
+    sine = math.sin(theta)
+    complement = 1.0 - math.cos(theta)
+    xy, xz, yz = complement * x * y, complement * x * z, complement * y * z
+    sx, sy, sz = sine * x, sine * y, sine * z
+    # Expand I + sin(theta) K + (1 - cos(theta)) K² directly, avoiding
+    # temporary skew/identity matrices and a tiny matrix multiplication.
+    return np.array(
+        [
+            [1.0 - complement * (y * y + z * z), xy - sz, xz + sy],
+            [xy + sz, 1.0 - complement * (x * x + z * z), yz - sx],
+            [xz - sy, yz + sx, 1.0 - complement * (x * x + y * y)],
+        ],
+        dtype=np.float64,
     )
 
 

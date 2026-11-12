@@ -333,14 +333,24 @@ def align_axis(
     if not np.all(np.isfinite(q0)):
         raise ValueError("q0 must contain only finite values")
     v = unit(target_vector)
+    return _align_axis(robot, joint_number_i, q0, v, robot.R0(q0, joint_number_i - 3))
 
+
+def _align_axis(
+    robot: Serial7DoF,
+    joint_number_i: int,
+    q0: np.ndarray,
+    target: np.ndarray,
+    prefix: np.ndarray,
+) -> Tuple[float, float]:
+    """Align a unit target using the already solved base-to-prefix rotation."""
     idx_a = joint_number_i - 3  # q_{i-2}, 0-based
     idx_b = joint_number_i - 2  # q_{i-1}, 0-based
     frame = joint_number_i - 2  # frame i-2, paper numbering
 
     # v^(i-2) with q_(i-2)=0: append only its fixed transform to the
     # already-solved prefix, avoiding a copied joint vector and zero rotation.
-    v_f = (robot.R0(q0, idx_a) @ robot.R_local[idx_a]).T @ v
+    v_f = (prefix @ robot.R_local[idx_a]).T @ target
 
     # q_(i-1) is zero, and rotating joint i leaves h_i unchanged. Both
     # local SP2 axes therefore depend only on the fixed model transforms.
@@ -401,24 +411,32 @@ def align_wrist_orientation(
     This is a geometric generalization, not Appendix C's Euler decomposition.
     """
     logger.debug("Wrist orientation alignment started")
-    q = np.asarray(q0, dtype=np.float64).reshape(-1).copy()
+    q = np.asarray(q0, dtype=np.float64).reshape(-1)
     H = np.asarray(H, dtype=np.float64)
     if q.shape != (7,):
         raise ValueError("q0 must have shape (7,)")
     if not _is_rotation_matrix(H):
         raise ValueError("H must be a valid 3x3 SO(3) rotation matrix")
+    if not np.all(np.isfinite(q)):
+        raise ValueError("q0 must contain only finite values")
+    return _align_wrist_orientation(robot, q, H, robot.R0(q, 4))
 
+
+def _align_wrist_orientation(
+    robot: Serial7DoF, q0: np.ndarray, H: np.ndarray, prefix: np.ndarray
+) -> np.ndarray:
+    """Recover the wrist with a validated pose and base-to-frame-4 rotation."""
     # Desired orientation of the 7th joint frame.
     R07_des = H @ robot.R_align.T @ robot.R_7T_local.T
 
     # Align h7 first using q5,q6.
-    h7_world_des = R07_des @ robot.axes_local[6]
-    q5, q6 = align_axis(robot, 7, q, h7_world_des)
-    q[4] = q5
-    q[5] = q6
+    h7_world_des = unit(R07_des @ robot.axes_local[6])
+    q5, q6 = _align_axis(robot, 7, q0, h7_world_des, prefix)
 
-    # Desired expression of h6 in frame 7.
-    u6_in_7 = R07_des.T @ (robot.R0(q, 6) @ robot.axes_local[5])
+    # Joint 6 cannot rotate its own axis. Reuse the solved prefix and append
+    # only joint 5, then the fixed frame-5-to-frame-6 transform.
+    h6_world = (prefix @ robot.joint_rotation(4, q5)) @ (robot.R_local[5] @ robot.axes_local[5])
+    u6_in_7 = R07_des.T @ h6_world
 
     # h6 expressed in frame 7 when q7=0; R_local[6] is R^(6,7)_local.
     h6_in_7_at_q7_zero = robot.R_local[6].T @ robot.axes_local[5]
@@ -456,18 +474,29 @@ def sew_mimic(
     q = np.asarray(q0, dtype=np.float64).reshape(-1).copy()
     if q.shape != (7,):
         raise ValueError("q0 must have shape (7,)")
+    if not np.all(np.isfinite(q)):
+        raise ValueError("q0 must contain only finite values")
 
     s = _as_vec3(shoulder)
     e = _as_vec3(elbow)
     w = _as_vec3(wrist)
     H = np.asarray(hand_orientation, dtype=np.float64)
+    if not _is_rotation_matrix(H):
+        raise ValueError("H must be a valid 3x3 SO(3) rotation matrix")
 
     upper_direction = unit(e - s)
     lower_direction = unit(w - e)
 
-    q[0:2] = align_axis(robot, 3, q, upper_direction)
-    q[2:4] = align_axis(robot, 5, q, lower_direction)
-    q[4:7] = align_wrist_orientation(robot, q, H)
+    prefix = np.eye(3)
+    for joint_number, direction in ((3, upper_direction), (5, lower_direction)):
+        first = joint_number - 3
+        q[first : first + 2] = _align_axis(robot, joint_number, q, direction, prefix)
+        prefix = (
+            prefix
+            @ robot.joint_rotation(first, q[first])
+            @ robot.joint_rotation(first + 1, q[first + 1])
+        )
+    q[4:7] = _align_wrist_orientation(robot, q, H, prefix)
     logger.debug("SEW-Mimic solve completed: q=%s", q)
     return q
 
