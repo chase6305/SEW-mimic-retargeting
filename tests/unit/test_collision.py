@@ -42,6 +42,114 @@ def test_capsule_signed_distance_and_contact_points():
     assert colliding.colliding
 
 
+def _assert_capsule_distances(endpoints, radius, expected, scale):
+    starts = np.asarray([endpoints[0], endpoints[2]], dtype=float)
+    ends = np.asarray([endpoints[1], endpoints[3]], dtype=float)
+    tolerance = dict(rel=1e-10, abs=1e-15 * scale)
+    first = Capsule(starts[0], ends[0], radius)
+    second = Capsule(starts[1], ends[1], radius)
+    assert capsule_contact(first, second).distance == pytest.approx(expected, **tolerance)
+    with np.errstate(all="raise"):
+        batched = _capsule_distances_unchecked(
+            starts[:1], ends[:1], starts[1:], ends[1:], np.array([radius]), np.array([radius])
+        )
+    assert batched[0] == pytest.approx(expected, **tolerance)
+    if cpp_backend_available():
+        native = get_cpp_collision_backend().minimum_distance(
+            starts, ends, np.array([radius, radius]), np.array([[0, 1]], dtype=np.int32)
+        )
+        assert native == pytest.approx(expected, **tolerance)
+
+
+@pytest.mark.parametrize("scale", [1e-5, 0.01, 1.0, 1e3])
+def test_small_crossing_segments_have_negative_clearance_at_every_scale(scale):
+    half_length = 1e-3 * scale
+    endpoints = half_length * np.array([[-1, 0, 0], [1, 0, 0], [0, -1, 0], [0, 1, 0]])
+    point_a, point_b, parameter_a, parameter_b = closest_points_on_segments(*endpoints)
+    np.testing.assert_allclose(point_a, np.zeros(3), atol=1e-15 * half_length)
+    np.testing.assert_allclose(point_b, np.zeros(3), atol=1e-15 * half_length)
+    assert parameter_a == pytest.approx(0.5)
+    assert parameter_b == pytest.approx(0.5)
+    _assert_capsule_distances(endpoints, half_length / 10, -half_length / 5, half_length)
+
+
+@pytest.mark.parametrize("half_length", [1e-8, 1e-6, 1e-3])
+@pytest.mark.parametrize("swap", [False, True])
+def test_short_nonzero_segment_keeps_its_interior_minimum(half_length, swap):
+    endpoints = half_length * np.array([[-1, 0, 0], [1, 0, 0], [0, 0.25, 0], [0, 0.25, 0]])
+    if swap:
+        endpoints = endpoints[[2, 3, 0, 1]]
+    _assert_capsule_distances(endpoints, half_length / 10, half_length / 20, half_length)
+
+
+@pytest.mark.parametrize("angle", [1e-4, 1e-6, 1e-8, 1e-12])
+@pytest.mark.parametrize("scale", [1e-3, 1.0, 1e3])
+@pytest.mark.parametrize("reverse_a,reverse_b,swap", [(False, False, False), (True, True, True)])
+def test_nearly_parallel_crossings_keep_the_interior_intersection(
+    angle, scale, reverse_a, reverse_b, swap
+):
+    endpoints = scale * np.array([[-1, 0, 0], [1, 0, 0], [-1, -angle, 0], [1, angle, 0]])
+    if reverse_a:
+        endpoints[[0, 1]] = endpoints[[1, 0]]
+    if reverse_b:
+        endpoints[[2, 3]] = endpoints[[3, 2]]
+    if swap:
+        endpoints = endpoints[[2, 3, 0, 1]]
+    _assert_capsule_distances(endpoints, 1e-4 * scale, -2e-4 * scale, scale)
+
+
+@pytest.mark.parametrize("angle", [0.3, 1e-6, 1e-10])
+def test_skew_capsules_keep_known_clearance_after_rigid_transform(angle):
+    # The centerlines' XY projections intersect at their midpoints, while
+    # their constant Z separation is 0.02 m. Rotate and translate this known
+    # minimum so neither the ordinary nor near-parallel kernel can depend on
+    # special world-axis coordinates or coincident closest points.
+    rotation = np.array([[2, -2, 1], [1, 2, 2], [-2, -1, 2]], dtype=float) / 3.0
+    endpoints = np.array([[-1, 0, 0], [1, 0, 0], [-1, -angle, 0.02], [1, angle, 0.02]])
+    endpoints = endpoints @ rotation.T + np.array([0.2, -0.3, 0.4])
+    _assert_capsule_distances(endpoints, 0.005, 0.01, 1.0)
+
+
+@pytest.mark.parametrize("reverse_a", [False, True])
+@pytest.mark.parametrize("reverse_b", [False, True])
+@pytest.mark.parametrize("swap", [False, True])
+def test_parallel_capsule_distance_is_invariant_to_endpoint_order(reverse_a, reverse_b, swap):
+    endpoints = 1e-3 * np.array([[0, 0, 0], [2, 0, 0], [1, 0.5, 0], [3, 0.5, 0]])
+    if reverse_a:
+        endpoints[[0, 1]] = endpoints[[1, 0]]
+    if reverse_b:
+        endpoints[[2, 3]] = endpoints[[3, 2]]
+    if swap:
+        endpoints = endpoints[[2, 3, 0, 1]]
+    _assert_capsule_distances(endpoints, 1e-4, 3e-4, 1e-3)
+
+
+@pytest.mark.parametrize("translation", [1e9, 1e12])
+@pytest.mark.parametrize(
+    "second_start,second_end,center_distance",
+    [
+        ([1, 1, 0], [1, 1, 0], np.sqrt(0.4)),
+        ([1, -1, 1], [1, 2, 2], np.sqrt(91.0) / 7),
+    ],
+)
+def test_vectorized_capsule_distance_preserves_clearance_under_large_translation(
+    translation, second_start, second_end, center_distance
+):
+    # Integral endpoints remain exactly representable after translation, but
+    # their closest points have fractional coordinates. Computing those in
+    # world coordinates first would lose precision at these large offsets.
+    offset = np.array([translation, -translation, translation])
+    starts = np.array([[0, 0, 0], second_start], dtype=float) + offset
+    ends = np.array([[3, 1, 0], second_end], dtype=float) + offset
+    starts.flags.writeable = False
+    ends.flags.writeable = False
+    with np.errstate(all="raise"):
+        distance = _capsule_distances_unchecked(
+            starts[:1], ends[:1], starts[1:], ends[1:], np.array([0.1]), np.array([0.1])
+        )
+    assert distance[0] == pytest.approx(center_distance - 0.2, rel=1e-13, abs=1e-14)
+
+
 @pytest.mark.parametrize("scale", [1e-5, 0.01, 1.0, 1e3])
 def test_vectorized_capsule_distances_match_scalar_kernel(scale):
     rng = np.random.default_rng(4)

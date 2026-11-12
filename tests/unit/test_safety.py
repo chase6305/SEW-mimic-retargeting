@@ -230,6 +230,44 @@ def test_safety_config_caches_read_only_geometry_arrays():
     assert not config.capsule_radii.flags.writeable
     assert not config.interpolation_point_radii.flags.writeable
     assert not config.collision_pair_indices.flags.writeable
+    assert len(config._collision_query) == 6
+    for index, values in enumerate(config._collision_query):
+        assert values.dtype == (np.intp if index < 4 else np.float64)
+        assert values.flags.owndata
+        assert not values.flags.writeable
+
+
+@pytest.mark.parametrize(
+    "pair,distance", [((0, 6), np.sqrt(5.0) - 0.16), ((1, 4), 0.84), ((1, 2), -0.15)]
+)
+def test_collision_queries_use_configured_capsule_endpoints_and_radii(pair, distance):
+    points = np.array(
+        [[0, 0, 0], [0, 0, 1], [0, 0, 2], [0, 0, 3], [1, 0, 0], [1, 0, 1], [1, 0, 2], [1, 0, 3]],
+        dtype=float,
+    )
+    config = replace(
+        _config(), torso_start=[-1, 0, 0], torso_end=[-1, 0, 1], collision_pairs=(pair,)
+    )
+    assert minimum_capsule_distance(points, config) == pytest.approx(distance)
+
+
+def test_replacing_collision_configuration_rebuilds_owned_pair_query_cache():
+    points = np.array(
+        [[0, 0, 0], [0, 0, 1], [0, 0, 2], [0, 0, 3], [1, 0, 0], [1, 0, 1], [1, 0, 2], [1, 0, 3]],
+        dtype=float,
+    )
+    pairs = np.array([[1, 4], [0, 6], [1, 4]])
+    original = replace(
+        _config(), torso_start=[-1, 0, 0], torso_end=[-1, 0, 1], collision_pairs=pairs
+    )
+    pairs[:] = 0  # Caller-owned pair arrays cannot change the prepared query.
+    assert original.collision_pairs == ((1, 4), (0, 6), (1, 4))
+    assert all(len(values) == 3 for values in original._collision_query)
+    updated = replace(original, collision_pairs=((1, 2),), radii=CapsuleRadii(0.1, 0.2, 0.3, 0.06))
+    assert minimum_capsule_distance(points, original) == pytest.approx(0.84)
+    assert minimum_capsule_distance(points, updated) == pytest.approx(-0.5)
+    for old, new in zip(original._collision_query, updated._collision_query):
+        assert not np.shares_memory(old, new)
 
 
 def test_safety_config_owns_geometry_without_freezing_callers_arrays():
