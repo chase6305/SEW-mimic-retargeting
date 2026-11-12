@@ -169,6 +169,13 @@ class Serial7DoF:
 # ---------------------------------------------------------------------------
 
 
+def _cross3(first: np.ndarray, second: np.ndarray) -> np.ndarray:
+    """Cross product for the already validated float64 3-vectors below."""
+    ax, ay, az = map(float, first)
+    bx, by, bz = map(float, second)
+    return np.array([ay * bz - az * by, az * bx - ax * bz, ax * by - ay * bx])
+
+
 def sp1(p1: Sequence[float], p2: Sequence[float], k: Sequence[float]) -> Tuple[float, bool]:
     """IK-Geo Subproblem 1.
 
@@ -179,17 +186,17 @@ def sp1(p1: Sequence[float], p2: Sequence[float], k: Sequence[float]) -> Tuple[f
     p2 = _as_vec3(p2)
     k = unit(k)
 
-    kxp = np.cross(k, p1)
-    A = np.column_stack((kxp, -np.cross(k, kxp)))
-    x = A.T @ p2
+    kxp = _cross3(k, p1)
+    second = -_cross3(k, kxp)
+    x0, x1 = float(kxp @ p2), float(second @ p2)
 
-    if np.linalg.norm(x) < EPS:
+    if math.hypot(x0, x1) < EPS:
         # Ill-posed: p1 or p2 is effectively parallel to k. Any angle has the
         # same projected objective; choose 0 for continuity.
         theta = 0.0
         return theta, True
 
-    theta = math.atan2(float(x[0]), float(x[1]))
+    theta = math.atan2(x0, x1)
     is_ls = (
         abs(float(np.linalg.norm(p1)) - float(np.linalg.norm(p2))) > 1e-8
         or abs(float(np.dot(k, p1) - np.dot(k, p2))) > 1e-8
@@ -217,11 +224,11 @@ def sp4(
     k = unit(k)
     d = float(d)
 
-    A11 = np.cross(k, p)
-    A1 = np.column_stack((A11, -np.cross(k, A11)))
-    A = h @ A1
+    a11 = _cross3(k, p)
+    a12 = -_cross3(k, a11)
+    a0, a1 = float(h @ a11), float(h @ a12)
     b = d - float(np.dot(h, k) * np.dot(k, p))
-    norm_A_2 = float(np.dot(A, A))
+    norm_A_2 = a0 * a0 + a1 * a1
 
     if norm_A_2 < EPS:
         # Ill-posed: objective is independent of theta.
@@ -229,24 +236,22 @@ def sp4(
         return np.array([0.0]), current_residual > 1e-8
 
     # This is the scaled least-squares vector used by the IK-Geo reference.
-    x_ls_tilde = A1.T @ (h * b)
+    hb = h * b
+    x0, x1 = float(a11 @ hb), float(a12 @ hb)
 
     if norm_A_2 > b * b + 1e-12:
         xi = math.sqrt(max(0.0, norm_A_2 - b * b))
-        x_N_prime_tilde = np.array([A[1], -A[0]], dtype=np.float64)
-        sc1 = x_ls_tilde + xi * x_N_prime_tilde
-        sc2 = x_ls_tilde - xi * x_N_prime_tilde
         theta = np.array(
             [
-                math.atan2(float(sc1[0]), float(sc1[1])),
-                math.atan2(float(sc2[0]), float(sc2[1])),
+                math.atan2(x0 + xi * a1, x1 - xi * a0),
+                math.atan2(x0 - xi * a1, x1 + xi * a0),
             ],
             dtype=np.float64,
         )
         return theta, False
 
     theta = np.array(
-        [math.atan2(float(x_ls_tilde[0]), float(x_ls_tilde[1]))],
+        [math.atan2(x0, x1)],
         dtype=np.float64,
     )
     # The tangent case norm_A_2 == b^2 has one exact solution. The MATLAB
@@ -273,7 +278,7 @@ def sp2(
     k2 = unit(k2)
 
     # Reference implementation is ill-posed when k1 || k2.
-    if np.linalg.norm(np.cross(k1, k2)) < EPS:
+    if np.linalg.norm(_cross3(k1, k2)) < EPS:
         raise DegenerateGeometryError("SP2 is ill-posed because k1 and k2 are parallel")
 
     p1_n = unit(p1)
