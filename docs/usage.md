@@ -86,10 +86,11 @@ Ordered trajectories share one API:
 from sew_mimic import solve_batch
 
 q_trajectory = solve_batch(
-    robot, q_initial,
-    shoulders,          # (N, 3)
-    elbows,             # (N, 3)
-    wrists,             # (N, 3)
+    robot,
+    q_initial,
+    shoulders,  # (N, 3)
+    elbows,  # (N, 3)
+    wrists,  # (N, 3)
     hand_orientations,  # (N, 3, 3)
     backend="cpp",
 )
@@ -113,9 +114,7 @@ once and pass current and desired bimanual commands:
 from sew_mimic.robots import create_robot_safety_filter
 
 safety_filter = create_robot_safety_filter("marvin", padding=1.05, backend="python")
-result = safety_filter.filter(
-    q_left_current, q_right_current, q_left_target, q_right_target
-)
+result = safety_filter.filter(q_left_current, q_right_current, q_left_target, q_right_target)
 q_left_command, q_right_command = result.q_left, result.q_right
 ```
 

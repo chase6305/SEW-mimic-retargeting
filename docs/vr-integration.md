@@ -377,9 +377,9 @@ from sew_mimic.tracking import TrackingMotionLimits, TrackingPoseStream
 
 # Illustrative values only: choose these from the intended motion and device noise.
 limits = TrackingMotionLimits(
-    max_joint_speed=2.0,           # m/s, Euclidean speed of each of six SEW joints
-    max_wrist_angular_speed=6.0,   # rad/s, shortest rotation angle per sample interval
-    max_sample_gap=0.1,           # maximum interval from the last valid reference
+    max_joint_speed=2.0,  # m/s, Euclidean speed of each of six SEW joints
+    max_wrist_angular_speed=6.0,  # rad/s, shortest rotation angle per sample interval
+    max_sample_gap=0.1,  # maximum interval from the last valid reference
 )
 poses = TrackingPoseStream(calibration, motion_limits=limits)
 ```

@@ -52,7 +52,9 @@ wrist = elbow + 0.314 * arm.robot.axis_world(q_reference, 5)
 q_command = solve(
     arm.robot,
     np.zeros(7),  # current joints, radians
-    shoulder, elbow, wrist,
+    shoulder,
+    elbow,
+    wrist,
     arm.robot.tool_orientation(q_reference),
     backend="python",
 )
